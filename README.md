@@ -2,12 +2,14 @@
 
 A personal tracker for tasks, habits, freelance hours, gym and money, built as a phone-installable web app. The code is plain HTML, CSS and JavaScript with no build step. Data is stored in Supabase and locked to your login.
 
-## What's in version 1
-- **Today:** what's due, habits to tick off, your routine reminders, and the freelance session prompt
+## What's in it
+- **Today:** freelance, gym and money at a glance, what's due, routine reminders, the freelance session prompt, and this week's commitments
 - **Tasks & plans:** tasks by area and date, "move to tomorrow" (anything moved twice gets flagged), and goals with milestones
 - **Work (freelance):** session timer, the next-step sticky note, a bad-day 15-minute button, the never-miss-twice tracker, days away, and your roadmap
 - **Account:** export all your data as a backup file, and sign out
-- Gym, Money and Weekly review are coming in the next update
+- **Gym:** start a workout, log sets as you go (it pre-fills your last weight and reps and shows what you did last time), personal bests, and sessions per week
+- **Money:** monthly budget and what's left per day, spending by category with overspend warnings, quick add expense, and one tap to re-add last month's recurring bills
+- **Weekly review:** an automatic scorecard, what slipped, last week's commitments, and three commitments for next week
 
 ## Setup (one-off)
 
@@ -39,4 +41,4 @@ Then open it from the home screen and sign in. You only need to sign in once per
 When there's a new version, upload the changed files the same way (**Add file → Upload files**). The files will replace the old ones, and the site updates in about a minute.
 
 ## Settings
-`config.js` holds your weekly freelance target (3 hours), your planned session days (Monday and Saturday) and the bad-day minimum (15 minutes).
+`config.js` holds your weekly freelance target (3 hours), your planned session days (Monday and Saturday), the bad-day minimum (15 minutes) and your gym target (4 a week).

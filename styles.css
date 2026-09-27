@@ -236,3 +236,62 @@ dialog#sheet::backdrop { background: rgba(28,27,24,0.45); }
 
 .soon { display: flex; flex-direction: column; gap: 8px; }
 .soon li { margin-bottom: 4px; }
+
+/* ---------- v2 additions ---------- */
+.nowrap { white-space: nowrap; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.card.flush { padding: 0 16px; gap: 0; }
+.btn.ghost-dark { background: transparent; color: #FFFDF8; border-color: #5E5A52; }
+.btn.big-btn { min-height: 56px; font-size: 17px; }
+.fab-label:empty { display: none; }
+.card.soft a { color: var(--green-deep); font-weight: 600; }
+.card.warn a { color: #5A2E0E; font-weight: 600; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+.commit { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 15px; font-weight: 500; }
+.slipped { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.slipped li::marker { color: var(--amber); }
+
+.quick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.quick-grid .btn { flex-direction: column; gap: 4px; min-height: 64px; font-size: 13px; padding: 6px; }
+
+/* Gym */
+.dots { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; text-align: center; font-size: 12px; color: var(--muted); }
+.dots div { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.dots div.is-today { color: var(--ink); font-weight: 600; }
+.dots span { width: 32px; height: 32px; border-radius: 16px; background: var(--line-soft); box-sizing: border-box; }
+.dots span.on { background: var(--green); }
+.dots span.now { background: transparent; border: 2px dashed var(--green); }
+.sets { display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1fr) 44px; align-items: center; gap: 2px 10px; font-size: 15px; }
+.sets > span:nth-child(-n+4) { font-size: 12px; color: var(--muted); font-weight: 600; }
+.sets .icon-btn { min-height: 36px; min-width: 36px; }
+
+/* Money */
+.month-nav { display: flex; gap: 4px; }
+.month-nav .icon-btn { background: var(--card); border: 1px solid var(--line); }
+.month-nav .icon-btn:disabled { opacity: 0.35; cursor: default; }
+.cat { all: unset; box-sizing: border-box; cursor: pointer; display: flex; flex-direction: column; gap: 6px; padding: 6px 0; min-height: 44px; border-radius: 8px; }
+.cat:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.cat .bar { height: 8px; }
+.cat-top { display: flex; justify-content: space-between; gap: 10px; font-size: 14px; }
+.cat-top .over { color: var(--amber-ink); font-weight: 600; font-size: 13px; }
+.cat-top .strong { font-weight: 600; }
+.amt { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.input.amount { font-family: var(--display); font-size: 28px; font-weight: 600; min-height: 60px; }
+.legend-lbl { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 6px; padding: 0; }
+.pick { display: flex; flex-wrap: wrap; gap: 6px; }
+.pick label { position: relative; }
+.pick input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.pick span { display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px; border-radius: 20px; border: 1px solid var(--field); background: var(--card); font-size: 14px; font-weight: 500; }
+.pick input:checked + span { background: var(--green); border-color: var(--green); color: #FFFDF8; font-weight: 600; }
+.pick input:focus-visible + span { outline: 2px solid var(--green); outline-offset: 2px; }
+.check-line { display: flex; align-items: center; gap: 10px; min-height: 48px; align-self: end; font-size: 15px; font-weight: 500; cursor: pointer; }
+
+/* Review */
+.score { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.score .v { font-size: 24px; }
+.score .s.good { color: var(--green); font-weight: 600; }
+.score .s.bad { color: var(--amber-ink); font-weight: 600; }
+@media (min-width: 960px) { .score { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.fab[hidden] { display: none; }

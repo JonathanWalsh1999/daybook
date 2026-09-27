@@ -9,3 +9,6 @@ export const SUPABASE_KEY = 'sb_publishable_48l_L3adMF5iPb9GDnpPug_gjn8uwAz';
 export const WORK_TARGET_MINUTES = 180;   // weekly target (3 hours)
 export const WORK_DAYS = [1, 6];          // planned sessions: 1 = Monday, 6 = Saturday
 export const MINIMUM_MINUTES = 15;        // the bad-day minimum
+
+// Gym
+export const GYM_TARGET_PER_WEEK = 4;     // sessions per week
