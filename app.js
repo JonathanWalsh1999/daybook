@@ -1,4 +1,4 @@
-import { SUPABASE_URL, SUPABASE_KEY, WORK_TARGET_MINUTES, WORK_DAYS, MINIMUM_MINUTES, GYM_TARGET_PER_WEEK } from './config.js';
+import { SUPABASE_URL, SUPABASE_KEY, WORK_TARGET_MINUTES, WORK_DAYS, MINIMUM_MINUTES, GYM_TARGET_PER_WEEK, VAPID_PUBLIC_KEY } from './config.js';
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -57,6 +57,7 @@ const ICONS = {
   snooze: '<path d="M5 12h12M13 7l5 5-5 5"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
+  town: '<path d="M3 20h18M5 20V10l4-2v12M9 20V5l6 3v12M15 20v-7l4-2v9"/>',
   left: '<path d="M15 5l-7 7 7 7"/>',
   right: '<path d="M9 5l7 7-7 7"/>',
 };
@@ -69,6 +70,7 @@ const S = {
   user: null, loadedAt: 0,
   tasks: [], sessions: [], daysOff: [], goals: [], milestones: [], reminders: [],
   workouts: [], sets: [], cats: [], expenses: [], reviews: [],
+  allReminders: [], breaks: [], policies: [], profile: null, tasksDoneCount: 0, needsUpdate: false, pushState: null,
   openGoals: new Set(), taskArea: 'all', showDone: false,
   month: monthOf(today()), reviewWeek: null,
 };
@@ -80,26 +82,34 @@ const remove = (table, id) => q(sb.from(table).delete().eq('id', id));
 const replaceIn = (arr, row) => { const i = arr.findIndex((x) => x.id === row.id); if (i >= 0) arr[i] = row; else arr.push(row); };
 const byId = (arr, id) => arr.find((x) => x.id === id);
 
+// Tables added in update 2 may not exist yet: load them softly and flag the update.
+async function soft(p, fallback = []) { const { data, error } = await p; if (error) { S.needsUpdate = true; return fallback; } return data; }
 async function loadAll() {
-  const since = addDays(today(), -120);
-  const sinceIso = parseYmd(since).toISOString();
+  const setsSince = parseYmd(addDays(today(), -180)).toISOString();
   const doneSince = new Date(Date.now() - 60 * 864e5).toISOString();
-  const [open, done, sessions, daysOff, goals, milestones, reminders, workouts, sets, cats, expenses, reviews] = await Promise.all([
+  S.needsUpdate = false;
+  const [open, done, doneCount, sessions, daysOff, goals, milestones, reminders, workouts, sets, cats, expenses, reviews, breaks, policies, profile] = await Promise.all([
     q(sb.from('tasks').select('*').eq('done', false).order('due_date', { ascending: true, nullsFirst: false }).order('created_at')),
     q(sb.from('tasks').select('*').eq('done', true).gte('done_at', doneSince).order('done_at', { ascending: false })),
-    q(sb.from('work_sessions').select('*').gte('session_on', since).order('session_on', { ascending: false }).order('created_at', { ascending: false })),
-    q(sb.from('days_off').select('*').gte('off_date', since).order('off_date')),
+    sb.from('tasks').select('id', { count: 'exact', head: true }).eq('done', true).then((r) => r.count || 0),
+    q(sb.from('work_sessions').select('*').order('session_on', { ascending: false }).order('created_at', { ascending: false })),
+    q(sb.from('days_off').select('*').order('off_date')),
     q(sb.from('goals').select('*').neq('status', 'dropped').order('created_at')),
     q(sb.from('milestones').select('*').order('sort_order').order('title')),
-    q(sb.from('reminders').select('*').eq('active', true).order('remind_at')),
-    q(sb.from('workouts').select('*').gte('started_at', sinceIso).order('started_at', { ascending: false })),
-    q(sb.from('workout_sets').select('*').gte('created_at', sinceIso).order('created_at')),
+    q(sb.from('reminders').select('*').order('weekday').order('remind_at')),
+    q(sb.from('workouts').select('*').order('started_at', { ascending: false })),
+    q(sb.from('workout_sets').select('*').gte('created_at', setsSince).order('created_at')),
     q(sb.from('expense_categories').select('*').order('sort_order').order('name')),
-    q(sb.from('expenses').select('*').gte('spent_on', addDays(today(), -400)).order('spent_on', { ascending: false }).order('created_at', { ascending: false })),
-    q(sb.from('weekly_reviews').select('*').order('week_start', { ascending: false }).limit(12)),
+    q(sb.from('expenses').select('*').order('spent_on', { ascending: false }).order('created_at', { ascending: false })),
+    q(sb.from('weekly_reviews').select('*').order('week_start', { ascending: false })),
+    soft(sb.from('breaks').select('*').order('start_date', { ascending: false })),
+    soft(sb.from('policies').select('*').order('created_at')),
+    soft(sb.from('profiles').select('*').maybeSingle(), null),
   ]);
-  Object.assign(S, { tasks: [...open, ...done], sessions, daysOff, goals, milestones, reminders, workouts, sets, cats, expenses, reviews, loadedAt: Date.now() });
+  Object.assign(S, { tasks: [...open, ...done], tasksDoneCount: Math.max(doneCount, done.length), sessions, daysOff, goals, milestones, allReminders: reminders, reminders: reminders.filter((r) => r.active), workouts, sets, cats, expenses, reviews, breaks, policies, profile, loadedAt: Date.now() });
+  applyTheme();
 }
+const applyTheme = () => { document.documentElement.dataset.theme = S.profile?.theme === 'dark' ? 'dark' : 'light'; };
 
 // First login: routine reminders + freelance roadmap. First visit after the money update: starter categories.
 async function seedIfNew() {
@@ -116,6 +126,7 @@ async function seedIfNew() {
     const names = ['Rent & bills', 'Groceries', 'Transport', 'Eating out', 'Subscriptions', 'Gym & health', 'Other'];
     await q(sb.from('expense_categories').insert(names.map((name, i) => ({ name, sort_order: i }))));
   }
+  if (!S.profile && !S.needsUpdate) await soft(sb.from('profiles').insert({}).select().single(), null);
   await loadAll();
 }
 
@@ -133,6 +144,7 @@ function slotStatus(slot) {
   const ss = S.sessions.filter((s) => s.session_on >= slot && s.session_on <= end);
   if (ss.length) return ss.some((s) => s.kind !== 'minimum') ? 'full' : 'minimum';
   if (S.daysOff.some((o) => o.off_date === slot)) return 'away';
+  if (isPaused(slot)) return 'paused';
   if (end >= today()) return 'pending';
   if (slot < startDate()) return 'before';
   return 'missed';
@@ -144,12 +156,13 @@ function recentSlots(n = 8) {
 }
 const currentSlot = () => recentSlots(1)[0] || null;
 function missWarning() {
-  const past = recentSlots(3).filter((s) => s.status !== 'pending' && s.status !== 'before');
+  if (isPaused()) return null;
+  const past = recentSlots(3).filter((s) => !['pending', 'before', 'paused', 'away'].includes(s.status));
   const last = past[past.length - 1];
   if (!last || last.status !== 'missed') return null;
   const prev = past[past.length - 2];
-  if (prev && prev.status === 'missed') return `Two missed in a row. Reset with just ${MINIMUM_MINUTES} minutes — that counts.`;
-  return `You missed ${DAY_LONG[isoWeekday(last.slot)]}'s session. Never miss twice — even ${MINIMUM_MINUTES} minutes keeps the chain.`;
+  if (prev && prev.status === 'missed') return `Two missed on the bounce. Reset with just ${MINIMUM_MINUTES} minutes — it genuinely counts.`;
+  return `Missed ${DAY_LONG[isoWeekday(last.slot)]}'s session. Not ideal, not a disaster — just don't miss twice.`;
 }
 
 // --- Gym ---
@@ -206,9 +219,272 @@ const spendBetween = (from, to) => sum(S.expenses.filter((e) => e.spent_on >= fr
 const reviewFor = (ws) => S.reviews.find((r) => r.week_start === ws) || null;
 
 /* =====================================================================
+   Personality: British, dry, kind. Lines are picked once per day so they don't flicker.
+   ===================================================================== */
+const hash = (s) => { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
+const daily = (arr, salt = '') => arr[hash(today() + salt) % arr.length];
+const any = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const Q = {
+  morning: ['Kettle first, ambition second.', "Let's make today mildly heroic.", "Rise and shine. Or just rise; shining's optional.", 'Fresh day. Try not to spill it.'],
+  afternoon: ['Still plenty of time to be impressive.', "Nothing a cup of tea can't fix.", 'Halfway there. Probably.'],
+  evening: ['The telly can wait five minutes.', 'One small win before the sofa?', 'Evening. Feet up soon, promise.'],
+  night: ['Burning the midnight oil? Bold.', "It's late. Future you would like some sleep."],
+  done: ['Done. Have a biscuit.', 'Ticked. Very civilised.', 'Smashed it. Modestly, of course.', 'One less thing. Lovely.', 'Sorted. Put the kettle on.'],
+  set: ['Lovely stuff.', 'Another one for the books.', 'Strong. Literally.', 'Your future self is impressed.'],
+  expense: ["Noted. We won't tell anyone.", 'Logged. The Treasury thanks you.', 'Receipt filed. Mentally.'],
+  session: ['Look at you, being a professional.', 'Logged. The Studio lot twitches with anticipation.', 'Nice one. Next step saved for later.'],
+  emptyDue: ["Nothing due. Suspicious, but we'll allow it.", 'Nothing due today. Enjoy the rare calm.', 'Clear skies on the to-do front.'],
+  quips: {
+    gym: ['Lift heavy things. Put them down again.', 'Sweat now, smug later.'],
+    money: ['Every pound a job. Even the pizza ones.', 'The Treasury is open for business.'],
+    work: ['Building the side hustle, one Monday at a time.', "VR, 360, Unity — and a fair bit of tea."],
+    tasks: ['Life admin: thrilling, necessary, done.', "If it's written down, it's half done. Roughly."],
+    town: ['Population: you, mostly.', 'Planning permission granted.'],
+  },
+};
+const greeting = () => { const h = new Date().getHours(); return h < 5 ? ['Still up?', daily(Q.night)] : h < 12 ? ['Good morning', daily(Q.morning)] : h < 18 ? ['Good afternoon', daily(Q.afternoon)] : ['Good evening', daily(Q.evening)]; };
+
+/* =====================================================================
+   Breaks (ill / holiday / rest): streaks freeze, targets shrink, nudges go quiet.
+   ===================================================================== */
+const breakCovers = (b, d) => b.start_date <= d && (!b.end_date || b.end_date >= d);
+const isPaused = (d = today()) => S.breaks.some((b) => breakCovers(b, d));
+const activeBreak = () => S.breaks.find((b) => breakCovers(b, today())) || null;
+const pausedDays = (from, to) => { let n = 0; for (let d = from; d <= to; d = addDays(d, 1)) if (isPaused(d)) n++; return n; };
+const activeRatio = (ws) => (7 - pausedDays(ws, addDays(ws, 6))) / 7;
+const gymTarget = (ws = weekStart(today())) => Math.round(GYM_TARGET_PER_WEEK * activeRatio(ws));
+const workTarget = (ws = weekStart(today())) => Math.round((WORK_TARGET_MINUTES * activeRatio(ws)) / 5) * 5;
+const BREAK_LABEL = { ill: 'Off sick', holiday: 'On holiday', rest: 'Rest day' };
+const BREAK_LINE = {
+  ill: 'Get well soon. Tea, toast and absolutely no guilt.',
+  holiday: 'Enjoy it. The town will cope without you. Just about.',
+  rest: 'Rest day, approved by the council. Very sensible.',
+};
+function recentReturn() { // a break of 2+ days that ended in the last 3 days
+  const t = today();
+  return S.breaks.filter((b) => b.end_date && b.end_date < t && b.end_date >= addDays(t, -3) && (parseYmd(b.end_date) - parseYmd(b.start_date)) / 864e5 >= 1)
+    .sort((a, b) => b.end_date.localeCompare(a.end_date))[0] || null;
+}
+
+/* =====================================================================
+   The town: growth points, levels, buildings, districts, policies
+   ===================================================================== */
+const LEVELS = [[0, 'Muddy field'], [100, 'Hamlet'], [250, 'Village'], [500, 'Market town'], [900, 'Spa town'], [1400, 'County town'], [2000, 'Cathedral city'], [2800, 'Great city'], [3800, 'Northern powerhouse'], [5000, 'Capital of the North']];
+const UNLOCKS = [
+  { level: 2, key: 'night', text: 'Night mode (in Settings)' },
+  { level: 3, key: 'slot4', text: 'A 4th policy slot' },
+  { level: 5, key: 'slot5', text: 'A 5th policy slot' },
+];
+const levelFor = (xp) => { let i = 0; while (i + 1 < LEVELS.length && xp >= LEVELS[i + 1][0]) i++; return { idx: i, name: LEVELS[i][1], floor: LEVELS[i][0], next: LEVELS[i + 1] || null }; };
+const unlocked = (key) => { const u = UNLOCKS.find((x) => x.key === key); return !!u && town().level.idx >= u.level; };
+const policySlots = () => 3 + (unlocked('slot4') ? 1 : 0) + (unlocked('slot5') ? 1 : 0);
+
+function monthsOnBudget() {
+  const b = budgetTotal(); if (!b) return [];
+  const months = [...new Set(S.expenses.map((e) => monthOf(e.spent_on)))].filter((m) => m < monthOf(today()));
+  return months.filter((m) => sum(monthExpenses(m), (e) => e.amount) <= b + 0.5);
+}
+function paidJobDone() {
+  return S.milestones.some((m) => m.done && /paid job/i.test(m.title)) || S.goals.some((g) => g.status === 'done' && g.area === 'freelance');
+}
+function townStats() {
+  const endedWorkouts = S.workouts.filter((w) => w.ended_at);
+  return {
+    workouts: endedWorkouts.length, sessions: S.sessions.length, tasksDone: S.tasksDoneCount,
+    expenses: S.expenses.length, onBudget: monthsOnBudget().length, reviews: S.reviews.length, paidJob: paidJobDone(),
+  };
+}
+
+// Every lot on the map: [i, j, width, depth], height in px, roof or not, and how to unlock it.
+const BUILDINGS = [
+  { id: 'shed', name: 'Gym shed', d: 'health', lot: [2, 2, 1, 1], h: 14, stat: 'workouts', need: 1, how: 'Finish your first workout' },
+  { id: 'leisure', name: 'Leisure centre', d: 'health', lot: [0, 0, 2, 1], h: 28, stat: 'workouts', need: 25, how: '25 workouts' },
+  { id: 'stadium', name: 'Stadium', d: 'health', lot: [0, 1, 2, 2], h: 14, stat: 'workouts', need: 100, how: '100 workouts' },
+  { id: 'workshop', name: 'Workshop', d: 'industry', lot: [0, 4, 1, 1], h: 16, stat: 'sessions', need: 1, how: 'Log a freelance session' },
+  { id: 'studio', name: 'VR Studio', d: 'industry', lot: [1, 4, 2, 2], h: 24, stat: 'paidJob', need: 1, how: 'Land your first paid job' },
+  { id: 'campus', name: 'Tech campus', d: 'industry', lot: [0, 6, 2, 2], h: 48, stat: 'sessions', need: 50, how: '50 freelance sessions' },
+  { id: 'kiosk', name: 'Money kiosk', d: 'treasury', lot: [4, 2, 1, 1], h: 10, stat: 'expenses', need: 1, how: 'Log your first expense' },
+  { id: 'bank', name: 'Bank', d: 'treasury', lot: [5, 1, 2, 2], h: 26, stat: 'onBudget', need: 1, how: 'Finish a month on budget' },
+  { id: 'exchange', name: 'Stock exchange', d: 'treasury', lot: [7, 0, 1, 2], h: 60, stat: 'onBudget', need: 6, how: '6 months on budget' },
+  { id: 'cottage', name: 'Cottage', d: 'services', lot: [4, 4, 1, 1], h: 12, roof: true, stat: 'tasksDone', need: 1, how: 'Tick off a task' },
+  { id: 'terrace', name: 'Terrace', d: 'services', lot: [5, 4, 2, 1], h: 16, roof: true, stat: 'tasksDone', need: 25, how: '25 tasks done' },
+  { id: 'townhall', name: 'Town hall', d: 'services', lot: [4, 6, 2, 2], h: 26, roof: true, stat: 'reviews', need: 1, how: 'Publish your first Gazette' },
+  { id: 'clock', name: 'Clock tower', d: 'services', lot: [6, 6, 1, 1], h: 58, roof: true, stat: 'reviews', need: 10, how: '10 Gazettes' },
+];
+const TREES = [[2, 0], [2, 1], [4, 0], [5, 0], [6, 0], [4, 1], [2, 6], [2, 7], [6, 5], [7, 4], [7, 5], [7, 6], [7, 7], [6, 7], [1, 3.9], [0, 5]];
+const statVal = (st, key) => (key === 'paidJob' ? (st.paidJob ? 1 : 0) : st[key] || 0);
+
+// Growth points are worked out from what you've logged, so they can never be lost.
+function growthEvents() {
+  const ev = []; const add = (date, pts, src, what) => ev.push({ date, pts, src, what });
+  S.workouts.filter((w) => w.ended_at).forEach((w) => add(localDay(w.started_at), 15, 'health', 'workout'));
+  S.sessions.forEach((s) => add(s.session_on, Math.min(30, Math.max(10, Math.round(s.minutes / 4))), 'industry', 'session'));
+  const doneLoaded = S.tasks.filter((x) => x.done && x.done_at);
+  doneLoaded.forEach((x) => add(localDay(x.done_at), 3, 'services', 'task'));
+  const older = Math.max(0, S.tasksDoneCount - doneLoaded.length); if (older) add('0000-00-00', older * 3, 'services', 'task');
+  S.milestones.filter((m) => m.done).forEach((m) => add(m.done_at ? localDay(m.done_at) : '0000-00-00', 20, 'town', 'milestone'));
+  S.reviews.forEach((r) => add(addDays(r.week_start, 6), 25, 'town', 'gazette'));
+  monthsOnBudget().forEach((m) => add(`${m}-${pad(daysInMonth(m))}`, 40, 'treasury', 'month'));
+  const perMonth = {};
+  S.expenses.slice().sort((a, b) => a.spent_on.localeCompare(b.spent_on)).forEach((e) => { const m = monthOf(e.spent_on); perMonth[m] = (perMonth[m] || 0) + 1; if (perMonth[m] <= 30) add(e.spent_on, 1, 'treasury', 'expense'); });
+  S.policies.filter((p) => p.active).forEach((p) => {
+    for (let ws = weekStart(localDay(p.created_at)); addDays(ws, 6) < today(); ws = addDays(ws, 7)) {
+      if (activeRatio(ws) > 0 && policyUpheld(p, ws)) add(addDays(ws, 6), 10, 'town', 'policy');
+    }
+  });
+  return ev;
+}
+let townCache = null; let townCacheKey = '';
+function town() {
+  const key = `${S.loadedAt}|${S.tasks.length}|${S.sessions.length}|${S.workouts.length}|${S.expenses.length}|${S.reviews.length}|${S.policies.length}|${S.milestones.filter((m) => m.done).length}|${S.tasks.filter((t) => t.done).length}|${S.workouts.filter((w) => w.ended_at).length}|${S.breaks.length}`;
+  if (townCache && key === townCacheKey) return townCache;
+  const ev = growthEvents();
+  const xp = sum(ev, (e) => e.pts);
+  const ws = weekStart(today());
+  const week = ev.filter((e) => e.date >= ws);
+  const st = townStats();
+  const built = BUILDINGS.filter((b) => statVal(st, b.stat) >= b.need).map((b) => b.id);
+  townCache = { xp, level: levelFor(xp), weekXp: sum(week, (e) => e.pts), week, st, built };
+  townCacheKey = key;
+  return townCache;
+}
+
+const PAL = {
+  health: ['#FF9A82', '#E8553B', '#B8361F'], industry: ['#A792FF', '#6D4AE8', '#4F2FC0'],
+  treasury: ['#FFD766', '#F2B21B', '#C48A00'], services: ['#86CDF5', '#1C8FD6', '#0E6FAF'], roof: ['#F07A5F', '#C94A30'],
+};
+function townSvg(t) {
+  const W = 22, H = 11, X0 = 184, Y0 = 70, N = 8;
+  const pt = (i, j, z = 0) => [X0 + (i - j) * W, Y0 + (i + j) * H - z];
+  const P = (ps) => ps.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+  const out = [];
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const road = i === 3 || j === 3;
+    out.push(`<polygon points="${P([pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1)])}" fill="${road ? '#CFC8D6' : (i + j) % 2 ? '#A9DE8A' : '#B6E59A'}" stroke="${road ? '#BDB5C6' : '#9ACF7C'}" stroke-width="0.8"/>`);
+  }
+  // road markings
+  for (let k = 0; k < N; k++) {
+    if (k !== 3) { const [x1, y1] = pt(3.5, k + 0.2), [x2, y2] = pt(3.5, k + 0.8); out.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>`); }
+    if (k !== 3) { const [x1, y1] = pt(k + 0.2, 3.5), [x2, y2] = pt(k + 0.8, 3.5); out.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>`); }
+  }
+  const items = [];
+  const nextUp = BUILDINGS.filter((b) => !t.built.includes(b.id));
+  BUILDINGS.forEach((b) => {
+    const [i, j, w, d] = b.lot; const depth = i + j + w + d;
+    if (!t.built.includes(b.id)) {
+      items.push({ depth: depth - 100, svg: `<polygon points="${P([pt(i, j), pt(i + w, j), pt(i + w, j + d), pt(i, j + d)])}" fill="rgba(255,255,255,0.35)" stroke="#6F8F5E" stroke-width="1.2" stroke-dasharray="4 3"><title>Empty lot: ${esc(b.name)} — ${esc(b.how)}</title></polygon>` });
+      return;
+    }
+    const [top, left, right] = PAL[b.d]; const h = b.h;
+    const A = pt(i, j, h), B = pt(i + w, j, h), C = pt(i + w, j + d, h), E = pt(i, j + d, h), Bb = pt(i + w, j), Cc = pt(i + w, j + d), Ee = pt(i, j + d);
+    let g = `<g stroke="#1E1B2E" stroke-width="1.2" stroke-linejoin="round"><title>${esc(b.name)}</title>`;
+    g += `<polygon points="${P([E, C, Cc, Ee])}" fill="${left}"/><polygon points="${P([B, C, Cc, Bb])}" fill="${right}"/>`;
+    if (b.roof) {
+      const apex = pt(i + w / 2, j + d / 2, h + 14);
+      g += `<polygon points="${P([E, C, apex])}" fill="${PAL.roof[0]}"/><polygon points="${P([B, C, apex])}" fill="${PAL.roof[1]}"/>`;
+    } else {
+      g += `<polygon points="${P([A, B, C, E])}" fill="${top}"/>`;
+    }
+    // windows on the right face
+    const rows = Math.floor((h - 6) / 10);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < d * 2; c++) {
+      const f = (c + 0.5) / (d * 2);
+      const [wx, wy] = pt(i + w, j + d * f, 6 + r * 10);
+      g += `<rect x="${(wx - 0.5).toFixed(1)}" y="${(wy - 5).toFixed(1)}" width="3" height="4" fill="#FFF3B8" stroke="none" transform="skewY(-26.6)" transform-origin="${wx} ${wy}"/>`;
+    }
+    g += '</g>';
+    items.push({ depth, svg: g });
+  });
+  const trees = TREES.slice(0, Math.min(TREES.length, 3 + t.level.idx * 2));
+  trees.forEach(([i, j]) => {
+    const [x, y] = pt(i + 0.5, j + 0.5);
+    items.push({ depth: i + j + 1.2, svg: `<g stroke="#1E1B2E" stroke-width="1.1"><rect x="${x - 1.5}" y="${y - 6}" width="3" height="7" fill="#8A5A2B"/><circle cx="${x}" cy="${y - 11}" r="7.5" fill="#3FAE6A"/></g>` });
+  });
+  items.sort((a, b) => a.depth - b.depth).forEach((it) => out.push(it.svg));
+  const label = `Your town: ${t.built.length} of ${BUILDINGS.length} buildings built${nextUp[0] ? `. Next: ${nextUp[0].name}` : ''}`;
+  return `<svg viewBox="0 0 368 250" role="img" aria-label="${esc(label)}">${out.join('')}</svg>`;
+}
+
+function districts() {
+  const t = today(); const from = addDays(t, -13);
+  const active14 = (14 - pausedDays(from, t)) / 14;
+  const rate = (r, labels) => (r >= 1 ? labels[0] : r >= 0.66 ? labels[1] : r >= 0.33 ? labels[2] : labels[3]);
+  const gym = gymDays(from, t).length; const gymT = Math.max(1, GYM_TARGET_PER_WEEK * 2 * active14);
+  const mins = sum(S.sessions.filter((s) => s.session_on >= from), (s) => s.minutes); const workT = Math.max(15, WORK_TARGET_MINUTES * 2 * active14);
+  const m = monthOf(t); const spent = sum(monthExpenses(m), (e) => e.amount); const b = budgetTotal();
+  const plan = b * (parseYmd(t).getDate() / daysInMonth(m));
+  const overdue = S.tasks.filter((x) => !x.done && x.due_date && x.due_date < t).length;
+  return [
+    { d: 'health', name: 'Health', href: '#/gym', v: `${gymDays(weekStart(t), t).length} / ${gymTarget()} gym`, pct: Math.max(gym / gymT, gymDays(weekStart(t), t).length / Math.max(1, gymTarget())) * 100, r: isPaused() ? 'Resting' : rate(Math.max(gym / gymT, gymDays(weekStart(t), t).length / Math.max(1, gymTarget())), ['Thriving', 'Healthy', 'Ticking over', 'Needs a visit']) },
+    { d: 'industry', name: 'Industry', href: '#/work', v: `${fmtMins(weekMinutes())} / ${fmtMins(workTarget())}`, pct: Math.max(mins / workT, weekMinutes() / Math.max(15, workTarget())) * 100, r: isPaused() ? 'Resting' : rate(Math.max(mins / workT, weekMinutes() / Math.max(15, workTarget())), ['Booming', 'Busy', 'Building up', 'Tumbleweed']) },
+    { d: 'treasury', name: 'Treasury', href: '#/money', v: b ? (spent <= b ? `${gbp(Math.round(b - spent))} left` : `${gbp(Math.round(spent - b))} over`) : gbp(Math.round(spent)), pct: b ? 100 - Math.max(0, ((spent - plan) / Math.max(1, b)) * 400) : 50, r: !b ? 'No budget set' : spent <= plan + 1 ? 'Balanced' : spent <= b ? 'A bit tight' : 'Overspent' },
+    { d: 'services', name: 'Services', href: '#/tasks', v: `${S.tasks.filter((x) => x.done && x.done_at && localDay(x.done_at) >= weekStart(t)).length} done`, pct: Math.max(8, 100 - overdue * 20), r: overdue === 0 ? 'Running smoothly' : overdue <= 3 ? 'Bit of a queue' : 'Council backlog' },
+  ];
+}
+
+// Policies you can enact. Each week one is kept earns +10 growth. Slipping just skips the bonus.
+const POLICY_TYPES = {
+  never_miss_twice: { title: 'Never miss twice', sub: 'Freelance: no two planned sessions missed in a row' },
+  gym_target: { title: 'Hit the gym target', sub: `${GYM_TARGET_PER_WEEK} sessions a week (less on breaks)` },
+  weekly_review: { title: 'Publish the Sunday Gazette', sub: 'Do the weekly review every week' },
+  pay_first: { title: 'Pay yourself first', sub: 'A savings payment logged every month', needsCat: true },
+  cap_category: { title: 'Stick to a category budget', sub: 'Stay within its monthly budget', needsCat: true },
+};
+function policyUpheld(p, ws) {
+  const we = addDays(ws, 6); const end = we < today() ? we : today();
+  if (p.kind === 'never_miss_twice') {
+    const slots = []; for (let d = addDays(ws, -7); d <= end; d = addDays(d, 1)) if (WORK_DAYS.includes(isoWeekday(d))) slots.push([d, slotStatus(d)]);
+    return !slots.some(([d, s], k) => k > 0 && d >= ws && s === 'missed' && slots[k - 1][1] === 'missed'); // only a second miss inside this week counts
+  }
+  if (p.kind === 'gym_target') return gymDays(ws, we).length >= gymTarget(ws);
+  if (p.kind === 'weekly_review') return !!reviewFor(ws);
+  const cid = p.params?.category_id; const m = monthOf(end);
+  if (p.kind === 'pay_first') return S.expenses.some((e) => e.category_id === cid && monthOf(e.spent_on) === m);
+  if (p.kind === 'cap_category') { const c = byId(S.cats, cid); if (!c || !c.monthly_budget) return true; return sum(S.expenses.filter((e) => e.category_id === cid && e.spent_on >= `${m}-01` && e.spent_on <= end), (e) => e.amount) <= Number(c.monthly_budget); }
+  return false;
+}
+function policyNow(p) {
+  const ws = weekStart(today());
+  if (isPaused()) return ['Paused', 'off'];
+  if (p.kind === 'gym_target') { const n = gymDays(ws, today()).length; return n >= gymTarget() ? ['Kept ✓', 'on'] : [`${n} of ${gymTarget()} so far`, 'off']; }
+  if (p.kind === 'weekly_review') return reviewFor(ws) ? ['Kept ✓', 'on'] : ['Due Sunday', 'off'];
+  if (p.kind === 'pay_first') return policyUpheld(p, ws) ? ['Kept ✓', 'on'] : ['Not yet this month', 'off'];
+  return policyUpheld(p, ws) ? ['On track', 'on'] : ['Slipped — no penalty', 'off'];
+}
+function policyStreak(p) { let n = 0; for (let ws = addDays(weekStart(today()), -7); ws >= weekStart(localDay(p.created_at)); ws = addDays(ws, -7)) { if (activeRatio(ws) === 0) continue; if (policyUpheld(p, ws)) n++; else break; } return n; }
+
+// The Gazette: headlines written from your week.
+function gazette(ws) {
+  const st = weekStats(ws); const we = addDays(ws, 6); const name = S.profile?.town_name || 'Daybook';
+  const off = pausedDays(ws, we < today() ? we : today());
+  const brk = S.breaks.find((b) => b.start_date <= we && (!b.end_date || b.end_date >= ws));
+  const gymStreak = (() => { let n = 0; for (let w = ws; n < 52; w = addDays(w, -7)) { if (gymDays(w, addDays(w, 6)).length >= Math.max(1, gymTarget(w))) n++; else break; } return n; })();
+  const doneMs = S.milestones.filter((m) => m.done && m.done_at && localDay(m.done_at) >= ws && localDay(m.done_at) <= we);
+  const pbs = S.sets.filter((x) => localDay(x.created_at) >= ws && localDay(x.created_at) <= we && !isCardio(x) && x.weight_kg != null)
+    .filter((x) => { const b = bestFor(x.exercise); return b && b.id === x.id; });
+  const nth = (n) => `${n}${[, 'st', 'nd', 'rd'][(n % 100 >> 3 ^ 1) && n % 10] || 'th'}`;
+  const stories = [];
+  if (off >= 3 && brk) stories.push({ k: 'town', p: 100, h: brk.kind === 'ill' ? 'Mayor off sick; town carries on regardless' : brk.kind === 'holiday' ? 'Mayor on holiday; nothing burns down' : 'Council declares official rest week', b: 'Streaks were frozen and targets shrunk. Nothing was missed.' });
+  if (st.gym >= Math.max(1, st.gymTarget)) stories.push({ k: 'health', p: 80 + gymStreak, h: gymStreak >= 2 ? `Gym attendance hits target for ${nth(gymStreak)} week running` : 'Gym attendance hits target; locals stunned', b: `${st.gym} session${st.gym === 1 ? '' : 's'} this week.` });
+  if (pbs.length) stories.push({ k: 'health', p: 75, h: `New personal best on ${pbs[0].exercise}`, b: `${kg(pbs[0].weight_kg)} × ${pbs[0].reps ?? '—'}. Someone frame it.` });
+  if (doneMs.length) stories.push({ k: 'town', p: 78, h: `Roadmap milestone reached: ${doneMs[0].title}`, b: 'Planning committee delighted. Biscuits were had.' });
+  if (st.work >= Math.max(15, st.workTarget)) stories.push({ k: 'industry', p: 70, h: 'Freelance district works full hours; kettle overworked', b: `${fmtMins(st.work)} logged against a ${fmtMins(st.workTarget)} target.` });
+  else if (st.work > 0) stories.push({ k: 'industry', p: 40, h: 'Industry ticks over; progress quietly made', b: `${fmtMins(st.work)} of ${fmtMins(st.workTarget)}. Every session counts.` });
+  if (st.planned && st.spend <= st.planned) stories.push({ k: 'treasury', p: 60, h: 'Treasury balanced. Chancellor quietly smug.', b: `${gbp(Math.round(st.planned - st.spend))} under plan this week.` });
+  else if (st.planned) stories.push({ k: 'treasury', p: 30, h: 'Spending runs a little hot', b: `${gbp(Math.round(st.spend - st.planned))} over plan. The pizza was worth it, presumably.` });
+  if (st.tasksDone >= 8) stories.push({ k: 'services', p: 55, h: `${st.tasksDone} jobs done; council baffled by efficiency`, b: 'Life admin: handled.' });
+  else if (st.tasksDone > 0) stories.push({ k: 'services', p: 35, h: `${st.tasksDone} task${st.tasksDone === 1 ? '' : 's'} ticked off`, b: 'Steady as she goes.' });
+  if (!stories.length) stories.push({ k: 'town', p: 1, h: `Quiet week in ${name}. Pigeons report no concerns.`, b: 'Next week is a fresh page.' });
+  stories.sort((a, b) => b.p - a.p);
+  return { name, lead: stories[0], rest: stories.slice(1, 5), st };
+}
+
+/* =====================================================================
    Rendering
    ===================================================================== */
-const ROUTES = [['today', 'Today'], ['gym', 'Gym'], ['money', 'Money'], ['work', 'Work'], ['tasks', 'Tasks'], ['review', 'Review']];
+const ROUTES = [['today', 'Today'], ['gym', 'Gym'], ['money', 'Money'], ['work', 'Work'], ['tasks', 'Tasks'], ['town', 'Town']];
+const HIDDEN = { review: ['Gazette', 'town'], settings: ['Settings', null] };
+const ACCENT = { today: 'town', gym: 'health', money: 'treasury', work: 'industry', tasks: 'services', town: 'town', review: 'town', settings: 'services' };
 const route = () => (location.hash.replace(/^#\/?/, '') || 'today').split('?')[0];
 
 function renderShell() {
@@ -216,8 +492,8 @@ function renderShell() {
     <div class="shell">
       <nav class="tabs" aria-label="Main">
         <div class="brand">Daybook</div>
-        ${ROUTES.map(([r, label]) => `<a href="#/${r}" data-route="${r}">${icon(r)}<span>${label}</span></a>`).join('')}
-        <a href="#" class="side-only" data-act="account">${icon('user')}<span>Account</span></a>
+        ${ROUTES.map(([r, label]) => `<a href="#/${r}" data-route="${r}"><span class="ico">${icon(r)}</span><span>${label}</span></a>`).join('')}
+        <a href="#/settings" class="side-only" data-route="settings"><span class="ico">${icon('user')}</span><span>Settings</span></a>
       </nav>
       <main class="view" id="view" tabindex="-1"></main>
       <button type="button" class="fab" data-act="fab" aria-label="Add">${icon('plus', 24)}<span class="fab-label"></span></button>
@@ -227,10 +503,15 @@ function renderShell() {
 let ticker = null;
 function render() {
   if (!S.user || !$('#view')) return;
-  const r = ROUTES.some(([k]) => k === route()) ? route() : 'today';
-  document.querySelectorAll('nav.tabs a[data-route]').forEach((a) => { if (a.dataset.route === r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
-  $('#view').innerHTML = VIEWS[r]();
-  document.title = `${ROUTES.find(([k]) => k === r)[1]} · Daybook`;
+  const r = ROUTES.some(([k]) => k === route()) || HIDDEN[route()] ? route() : 'today';
+  const navR = HIDDEN[r] ? HIDDEN[r][1] : r;
+  document.querySelectorAll('nav.tabs a[data-route]').forEach((a) => { if (a.dataset.route === navR || a.dataset.route === r) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+  const view = $('#view');
+  view.dataset.accent = ACCENT[r];
+  view.innerHTML = VIEWS[r]();
+  document.title = `${ROUTES.find(([k]) => k === r)?.[1] || HIDDEN[r][0]} · Daybook`;
+  $('.fab').dataset.accent = ACCENT[r];
+  $('.fab').classList.toggle('treasury', r === 'money');
   const fab = $('.fab');
   const fabLabel = { money: 'Add expense' }[r] || '';
   fab.hidden = !['today', 'tasks', 'work', 'money'].includes(r);
@@ -238,6 +519,7 @@ function render() {
   fab.setAttribute('aria-label', fabLabel || 'Quick add');
   clearInterval(ticker);
   if (document.querySelector('[data-since]')) { tick(); ticker = setInterval(tick, 1000); }
+  maybeCelebrate();
 }
 // Live clocks: any element with data-since="<ms>" shows elapsed time.
 function tick() {
@@ -247,10 +529,10 @@ function tick() {
   });
 }
 
-const head = (eyebrow, title, extra = '') => `<header class="view-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1></div>${extra}</header>`;
-const avatarBtn = () => `<button type="button" class="avatar" data-act="account" aria-label="Account">${esc((S.user.email || '?')[0].toUpperCase())}</button>`;
-const note = (html, cls = 'warn') => `<div class="card ${cls}" role="note"><div style="font-size:14px">${html}</div></div>`;
-const bar = (pct, over = false) => `<div class="bar"><span style="width:${Math.max(0, Math.min(100, pct))}%${over ? ';background:var(--amber)' : ''}"></span></div>`;
+const head = (eyebrow, title, extra = '', quip = '') => `<header class="view-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1>${quip ? `<div class="quip">${quip}</div>` : ''}</div>${extra}</header>`;
+const avatarBtn = () => `<a href="#/settings" class="avatar" style="display:flex;align-items:center;justify-content:center;text-decoration:none" aria-label="Settings">${esc((S.user.email || '?')[0].toUpperCase())}</a>`;
+const note = (emo, html, cls = 'warn') => `<div class="card ${cls}" role="note"><div class="note"><span class="emo" aria-hidden="true">${emo}</span><span>${html}</span></div></div>`;
+const bar = (pct, over = false) => `<div class="bar ${over ? 'over' : ''}"><span style="width:${Math.max(0, Math.min(100, pct))}%${over ? ';background:var(--health)' : ''}"></span></div>`;
 
 function taskRow(t, { showDate = true } = {}) {
   const overdue = !t.done && t.due_date && t.due_date < today();
@@ -281,71 +563,6 @@ function nextStepSticky(label = 'Next step · from last session') {
   return ns ? `<section class="sticky" aria-label="Next step"><span class="lbl">${esc(label)}</span><span class="txt">${esc(ns)}</span></section>` : '';
 }
 
-/* ---------- Today ---------- */
-function viewToday() {
-  const t = today();
-  const hour = new Date().getHours();
-  const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
-  const due = S.tasks.filter((x) => !x.done && x.due_date && x.due_date <= t);
-  const doneToday = S.tasks.filter((x) => x.done && x.done_at && localDay(x.done_at) === t && x.due_date && x.due_date <= t);
-  const list = [...due.sort((a, b) => a.due_date.localeCompare(b.due_date)), ...doneToday];
-  const mins = weekMinutes();
-  const ws = weekStart(t);
-  const gym = gymDays(ws, t).length;
-  const m = monthOf(t); const spent = sum(monthExpenses(m), (e) => e.amount); const budget = budgetTotal();
-  const rems = S.reminders.filter((r) => r.weekday === isoWeekday(t));
-  const cur = currentSlot();
-  const warn = missWarning();
-  const running = !!store.get('timer');
-  const active = activeWorkout();
-  const lastGym = S.workouts[0] ? localDay(S.workouts[0].started_at) : null;
-  const gymGap = lastGym ? Math.round((parseYmd(t) - parseYmd(lastGym)) / 864e5) : null;
-  const lastReview = reviewFor(addDays(ws, -7));
-  const commitments = (lastReview?.commitments || []).filter(Boolean);
-  const needsReview = isoWeekday(t) >= 6 && !reviewFor(ws);
-
-  let workCard = '';
-  if (running) workCard = timerCard();
-  else if (cur && cur.status === 'pending') {
-    const isToday = cur.slot === t;
-    const deadline = DAY_LONG[isoWeekday(nextSlotAfter(cur.slot))];
-    workCard = `
-    <section class="card soft" aria-label="Freelance">
-      <div class="card-head"><h2>${isToday ? 'Freelance session today' : `${DAY_LONG[isoWeekday(cur.slot)]}'s session isn't logged yet`}</h2><span class="meta nowrap" style="color:var(--green-deep)">${fmtMins(mins)} / ${fmtMins(WORK_TARGET_MINUTES)}</span></div>
-      ${!isToday ? `<div style="font-size:14px">You've got until ${deadline} to catch up. Already did it? Log it so it counts.</div>` : ''}
-      ${latestNextStep() ? `<div style="font-size:15px;font-weight:500">Next step: ${esc(latestNextStep())}</div>` : ''}
-      <div class="btn-row"><button type="button" class="btn primary grow" data-act="start-timer">Start session</button><button type="button" class="btn small" data-act="log-minimum">Bad day · ${MINIMUM_MINUTES} min</button></div>
-      ${!isToday ? `<button type="button" class="btn link" data-act="log-session" data-date="${cur.slot}" style="align-self:flex-start">I did it — log ${DAY_LONG[isoWeekday(cur.slot)]}'s session</button>` : ''}
-    </section>`;
-  }
-
-  return `
-    ${head(fmtLong(t), greet, avatarBtn())}
-    <section class="tiles" aria-label="At a glance">
-      <a class="tile" href="#/work"><span class="k">Freelance</span><span class="v">${fmtMins(mins)}</span><span class="s">of ${fmtMins(WORK_TARGET_MINUTES)} this week</span></a>
-      <a class="tile" href="#/gym"><span class="k">Gym</span><span class="v">${gym} / ${GYM_TARGET_PER_WEEK}</span><span class="s">this week</span></a>
-      <a class="tile" href="#/money"><span class="k">Money</span><span class="v">${budget ? gbp(Math.round(Math.abs(budget - spent))) : gbp(Math.round(spent))}</span><span class="s">${budget ? (spent > budget ? 'over budget' : `left in ${parseYmd(t).toLocaleDateString('en-GB', { month: 'short' })}`) : 'spent this month'}</span></a>
-    </section>
-    ${rems.map((r) => note(`<b>${fmtTime(r.remind_at)}</b> · ${esc(r.title)}`)).join('')}
-    ${warn && !running ? note(esc(warn)) : ''}
-    ${active ? note(`Workout in progress: <b>${esc(active.name || 'Workout')}</b> · <a href="#/gym">carry on</a>`, 'soft') : (gymGap != null && gymGap >= 3 ? note(`Your last gym session was ${gymGap} days ago (${esc(relDay(lastGym))}).`) : '')}
-    ${needsReview ? note(`It's the weekend — take 5 minutes for your <a href="#/review">weekly review</a>.`, 'soft') : ''}
-    <div class="desk-grid">
-      <div class="col">
-        ${workCard}
-        <section class="card" aria-label="Due today">
-          <div class="card-head"><h2>Due today</h2><span class="meta">${list.length ? `${doneToday.length} of ${list.length} done` : ''}</span></div>
-          ${list.length ? `<div class="list">${list.map((x) => taskRow(x, { showDate: x.due_date < t })).join('')}</div>` : `<p class="empty">Nothing due. Add a task with the + button.</p>`}
-          <a class="btn link" href="#/tasks" style="align-self:flex-start">All tasks →</a>
-        </section>
-      </div>
-      <div class="col">
-        ${commitments.length ? `<section class="card soft" aria-label="This week's commitments"><div class="card-head"><h2>This week I said I'd…</h2></div><ol class="commit">${commitments.map((c) => `<li>${esc(c)}</li>`).join('')}</ol></section>` : ''}
-        ${!workCard.includes('Next step') && latestNextStep() && !running ? nextStepSticky('Freelance · next step') : ''}
-      </div>
-    </div>`;
-}
-
 /* ---------- Tasks ---------- */
 function viewTasks() {
   const t = today();
@@ -364,7 +581,7 @@ function viewTasks() {
   const overdueCount = open.filter((x) => x.due_date && x.due_date < t).length;
 
   return `
-    ${head(`${open.length} open${overdueCount ? ` · ${overdueCount} overdue` : ''}`, 'Tasks &amp; plans')}
+    ${head(`${open.length} open${overdueCount ? ` · ${overdueCount} overdue` : ''}`, 'Tasks &amp; plans', '', daily(Q.quips.tasks, 'tasks'))}
     <form class="card" data-form="task" autocomplete="off">
       <label class="sr" for="new-task">New task</label>
       <div class="inline-add"><input id="new-task" name="title" class="input" placeholder="Add a task…" required maxlength="200"><button class="btn primary" type="submit">Add</button></div>
@@ -429,7 +646,7 @@ function goalCard(g) {
 }
 
 /* ---------- Work (freelance) ---------- */
-const SLOT_TEXT = { full: ['Done', 'ok'], minimum: ['Minimum ✓', 'ok'], away: ['Away', ''], missed: ['Missed', 'due'], pending: ['To do', 'due'], before: ['—', ''] };
+const SLOT_TEXT = { full: ['Done', 'ok'], minimum: ['Minimum ✓', 'ok'], away: ['Away', ''], missed: ['Missed', 'due'], pending: ['To do', 'due'], before: ['—', ''], paused: ['On a break', ''] };
 function viewWork() {
   const t = today();
   const mins = weekMinutes();
@@ -444,14 +661,15 @@ function viewWork() {
   const upcomingOff = S.daysOff.filter((o) => o.off_date >= t);
 
   return `
-    ${head('VR · 360 · Unity', 'Freelance')}
-    ${warn && !running ? note(esc(warn)) : ''}
+    ${head('VR · 360 · Unity', 'Freelance', '', daily(Q.quips.work, 'work'))}
+    ${activeBreak() ? note('🛌', `${BREAK_LABEL[activeBreak().kind]} — planned sessions are paused, nothing counts as missed.`, 'break-card') : ''}
+    ${warn && !running ? note('🔗', esc(warn), 'warn') : ''}
     <div class="desk-grid">
       <div class="col">
         <section class="card dark" aria-label="This week">
-          <div class="card-head"><span class="meta">This week</span><span class="meta">Target ${fmtMins(WORK_TARGET_MINUTES)}</span></div>
+          <div class="card-head"><span class="meta">This week</span><span class="meta">Target ${fmtMins(workTarget())}${workTarget() < WORK_TARGET_MINUTES ? ' (break-adjusted)' : ''}</span></div>
           <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span class="big">${fmtMins(mins)}</span>${vol ? `<span class="meta">incl. ${fmtMins(vol)} volunteer</span>` : ''}</div>
-          ${bar((mins / WORK_TARGET_MINUTES) * 100)}
+          ${bar((mins / Math.max(1, workTarget())) * 100)}
           <div class="week-slots">${weekSlots.map((d) => {
             const st = d > t ? ['Coming up', ''] : SLOT_TEXT[slotStatus(d)];
             return `<div><span>${DAY[isoWeekday(d)]} ${parseYmd(d).getDate()}</span><b class="${st[1]}">${d === t && slotStatus(d) === 'pending' ? 'Today' : st[0]}</b></div>`;
@@ -464,7 +682,7 @@ function viewWork() {
         <section class="card" aria-label="Never miss twice">
           <div class="card-head"><h2>Never miss twice</h2><span class="meta">last ${slots.length} planned</span></div>
           <div class="slots">${slots.map(({ slot, status }) => `<div class="slot ${status}" title="${esc(fmtShort(slot))}: ${status}"><i></i>${DAY[isoWeekday(slot)]}<br>${parseYmd(slot).getDate()}</div>`).join('')}</div>
-          <div class="legend"><span style="--c:var(--green)">Full</span><span style="--c:var(--mint)">${MINIMUM_MINUTES}-min</span><span style="--c:var(--amber)">Missed</span><span style="--c:transparent;--b:2px dashed #B9B09C">Away</span><span style="--c:transparent;--b:2px solid var(--green)">To do</span></div>
+          <div class="legend"><span style="--c:var(--industry)">Full</span><span style="--c:var(--industry-soft)">${MINIMUM_MINUTES}-min</span><span style="--c:var(--health-soft)">Missed</span><span style="--c:var(--services-soft)">Away / break</span><span style="--c:var(--card)">To do</span></div>
         </section>
       </div>
       <div class="col">
@@ -491,7 +709,7 @@ function weekDots(ws, days) {
   const t = today();
   return `<div class="dots">${[1, 2, 3, 4, 5, 6, 7].map((i) => {
     const d = addDays(ws, i - 1);
-    const cls = days.includes(d) ? 'on' : d === t ? 'now' : '';
+    const cls = days.includes(d) ? 'on' : isPaused(d) ? 'paused' : d === t ? 'now' : '';
     return `<div class="${d === t ? 'is-today' : ''}">${DAY[i][0]}<span class="${cls}" aria-label="${DAY_LONG[i]}${days.includes(d) ? ': trained' : ''}"></span></div>`;
   }).join('')}</div>`;
 }
@@ -509,11 +727,11 @@ function viewGymIdle() {
   const recent = S.workouts.filter((x) => x.ended_at).slice(0, 12);
   const bests = [...exerciseNames().slice(0, 8), ...exerciseNames(true).slice(0, 4)].map((e) => ({ e, b: bestFor(e) })).filter((x) => x.b);
   return `
-    ${head(`Goal: ${GYM_TARGET_PER_WEEK} sessions a week`, 'Gym')}
+    ${head(`Goal: ${GYM_TARGET_PER_WEEK} sessions a week`, 'Gym', '', daily(Q.quips.gym, 'gym'))}
     <div class="desk-grid">
       <div class="col">
         <section class="card" aria-label="This week">
-          <div class="card-head"><h2>This week</h2><span class="meta">${days.length} of ${GYM_TARGET_PER_WEEK}${lastWeek ? ` · last week ${lastWeek}` : ''}</span></div>
+          <div class="card-head"><h2>This week</h2><span class="meta">${days.length} of ${gymTarget()}${lastWeek ? ` · last week ${lastWeek}` : ''}</span></div>
           ${weekDots(ws, days)}
         </section>
         <form class="card" data-form="start-workout" autocomplete="off">
@@ -610,13 +828,13 @@ function viewMoney() {
   const navBtns = `<div class="month-nav"><button type="button" class="icon-btn" data-act="month" data-dir="-1" aria-label="Previous month">${icon('left', 20)}</button><button type="button" class="icon-btn" data-act="month" data-dir="1" aria-label="Next month" ${isNow ? 'disabled' : ''}>${icon('right', 20)}</button></div>`;
 
   return `
-    ${head(isNow ? `${fmtMonth(m)} · ${daysLeft} day${daysLeft === 1 ? '' : 's'} left` : fmtMonth(m), 'Money', navBtns)}
+    ${head(isNow ? `${fmtMonth(m)} · ${daysLeft} day${daysLeft === 1 ? '' : 's'} left` : fmtMonth(m), 'Money', navBtns, daily(Q.quips.money, 'money'))}
     <section class="card dark" aria-label="Monthly spending">
       <span class="meta">Spent ${isNow ? 'this month' : `in ${fmtMonth(m)}`}</span>
       <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap"><span class="big">${gbp(spent)}</span>${budget ? `<span class="meta">of ${gbp(budget)}</span>` : ''}</div>
       ${budget ? bar((spent / budget) * 100, spent > budget) : ''}
-      <div style="font-size:14px;color:#E9E4D8">${!budget ? 'Set a monthly budget on each category below to see what\'s left.'
-        : left < 0 ? `<b style="color:#F2B98A">${gbp(-left)} over budget</b>`
+      <div style="font-size:14px;opacity:0.9">${!budget ? 'Set a monthly budget on each category below to see what\'s left.'
+        : left < 0 ? `<b style="color:#FF9A82">${gbp(-left)} over budget.</b> The pizza was worth it, presumably.`
         : isNow ? `${gbp(left)} left · about ${gbp(Math.floor(left / Math.max(1, daysLeft)))} a day` : `${gbp(left)} under budget`}</div>
     </section>
     ${missing.length ? `<section class="card soft" aria-label="Recurring bills"><div style="font-size:14px"><b>${missing.length} recurring bill${missing.length === 1 ? '' : 's'}</b> from last month not logged yet (${gbp(sum(missing, (e) => e.amount))}): ${missing.map((e) => esc(e.description || catName(e.category_id))).join(', ')}.</div><button type="button" class="btn small primary" data-act="add-recurring" style="align-self:flex-start">Add them for ${esc(parseYmd(m + '-01').toLocaleDateString('en-GB', { month: 'long' }))}</button></section>` : ''}
@@ -646,7 +864,158 @@ function viewMoney() {
     </div>`;
 }
 
-/* ---------- Weekly review ---------- */
+/* ---------- Today ---------- */
+function growthMini() {
+  const t = town(); const L = t.level;
+  if (!S.profile?.town_name && !S.needsUpdate) return `<a class="card accent" href="#/town" style="text-decoration:none;color:inherit;--accent-soft:var(--town-soft)"><div class="card-head"><h2>Your town is waiting</h2><span class="level-chip">${esc(L.name)}</span></div><span>Everything you log builds it. Tap to name it and see what you've built so far →</span></a>`;
+  const pct = L.next ? ((t.xp - L.floor) / (L.next[0] - L.floor)) * 100 : 100;
+  return `<a class="card accent" href="#/town" style="text-decoration:none;color:inherit;gap:8px;--accent:var(--town);--accent-soft:var(--town-soft)">
+    <div class="card-head"><h2 class="town-name">${esc(S.profile?.town_name || 'Your town')} <span class="level-chip">${esc(L.name)}</span></h2><span class="meta nowrap">+${t.weekXp} this week</span></div>
+    ${bar(pct)}
+    <span class="meta">${L.next ? `${L.next[0] - t.xp} growth to ${esc(L.next[1])}` : 'Top of the league. Frankly showing off.'}</span>
+  </a>`;
+}
+
+function viewToday() {
+  const t = today();
+  const [greet, quip] = greeting();
+  const due = S.tasks.filter((x) => !x.done && x.due_date && x.due_date <= t);
+  const doneToday = S.tasks.filter((x) => x.done && x.done_at && localDay(x.done_at) === t && x.due_date && x.due_date <= t);
+  const list = [...due.sort((a, b) => a.due_date.localeCompare(b.due_date)), ...doneToday];
+  const mins = weekMinutes();
+  const ws = weekStart(t);
+  const gym = gymDays(ws, t).length;
+  const m = monthOf(t); const spent = sum(monthExpenses(m), (e) => e.amount); const budget = budgetTotal();
+  const brk = activeBreak();
+  const back = !brk && recentReturn();
+  const rems = brk ? [] : S.reminders.filter((r) => r.active && r.weekday === isoWeekday(t));
+  const cur = currentSlot();
+  const warn = brk ? null : missWarning();
+  const running = !!store.get('timer');
+  const active = activeWorkout();
+  const lastGym = S.workouts[0] ? localDay(S.workouts[0].started_at) : null;
+  const gymGap = lastGym ? Math.round((parseYmd(t) - parseYmd(lastGym)) / 864e5) : null;
+  const lastReview = reviewFor(addDays(ws, -7));
+  const commitments = (lastReview?.commitments || []).filter(Boolean);
+  const needsReview = !brk && isoWeekday(t) >= 6 && !reviewFor(ws);
+  const waiting = back ? S.tasks.filter((x) => !x.done && x.due_date && x.due_date < t && x.due_date >= back.start_date) : [];
+
+  let workCard = '';
+  if (running) workCard = timerCard();
+  else if (!brk && cur && cur.status === 'pending') {
+    const isToday = cur.slot === t;
+    const deadline = DAY_LONG[isoWeekday(nextSlotAfter(cur.slot))];
+    workCard = `
+    <section class="card" style="background:var(--industry-soft)" aria-label="Freelance">
+      <div class="card-head"><h2>${isToday ? 'Freelance session today' : `${DAY_LONG[isoWeekday(cur.slot)]}'s session isn't logged yet`}</h2><span class="meta nowrap">${fmtMins(mins)} / ${fmtMins(workTarget())}</span></div>
+      ${!isToday ? `<div style="font-size:14px">You've got until ${deadline} to catch up. Already did it? Log it so it counts.</div>` : ''}
+      ${latestNextStep() ? `<div class="sticky" style="transform:none;box-shadow:none"><span class="lbl">Next step</span><span class="txt" style="font-size:16px">${esc(latestNextStep())}</span></div>` : ''}
+      <div class="btn-row" style="--accent-deep:var(--industry)"><button type="button" class="btn primary grow" data-act="start-timer">Start session</button><button type="button" class="btn small" data-act="log-minimum">Bad day · ${MINIMUM_MINUTES} min</button></div>
+      ${!isToday ? `<button type="button" class="btn link" data-act="log-session" data-date="${cur.slot}" style="align-self:flex-start;color:var(--industry-deep)">I did it — log ${DAY_LONG[isoWeekday(cur.slot)]}'s session</button>` : ''}
+    </section>`;
+  }
+
+  const notes = [];
+  if (S.needsUpdate) notes.push(note('🛠️', 'One-off database update needed for the town, breaks and notifications. Run <b>update-2.sql</b> in Supabase (see Claude\'s message).', 'update-banner'));
+  rems.forEach((r) => notes.push(note('⏰', `<b>${fmtTime(r.remind_at)}</b> · ${esc(r.title)}`, 'soft')));
+  if (warn && !running) notes.push(note('🔗', esc(warn), 'warn'));
+  if (active) notes.push(note('🏋️', `Workout in progress: <b>${esc(active.name || 'Workout')}</b> · <a href="#/gym">carry on</a>`, 'warn'));
+  else if (!brk && gymGap != null && gymGap >= 3) notes.push(note('📞', `Your gym membership called. It misses you. (${gymGap} days since ${esc(relDay(lastGym))}.)`, 'warn'));
+  if (needsReview) notes.push(note('📰', `It's the weekend — your <a href="#/review">Gazette</a> is ready to write. Five minutes, one cuppa.`, 'soft'));
+
+  return `
+    ${head(fmtLong(t), greet, avatarBtn(), quip)}
+    ${brk ? `<section class="card break-card" aria-label="On a break">
+      <div class="card-head"><h2>${BREAK_LABEL[brk.kind]}</h2><span class="meta">since ${esc(relDay(brk.start_date))}${brk.end_date ? ` · until ${esc(fmtShort(brk.end_date))}` : ''}</span></div>
+      <div style="font-size:15px">${BREAK_LINE[brk.kind]} Streaks are frozen, targets have shrunk and the nudges have gone quiet.</div>
+      <button type="button" class="btn primary" data-act="end-break" data-id="${brk.id}" style="--accent-deep:var(--services-deep)">I'm back</button>
+    </section>` : ''}
+    ${back ? `<section class="card soft" aria-label="Welcome back">
+      <div class="card-head"><h2>Oh, you're back</h2></div>
+      <div style="font-size:15px">The town barely noticed. (It did. It missed you.) Nothing counted as missed, and this week's targets are adjusted for the days you were off.</div>
+      ${latestNextStep() ? `<div style="font-size:14px"><b>Easy restart:</b> ${MINIMUM_MINUTES} minutes on “${esc(latestNextStep())}”.</div>` : ''}
+      ${waiting.length ? `<div style="font-size:14px">${waiting.length} task${waiting.length === 1 ? '' : 's'} waited for you.</div><button type="button" class="btn small primary" data-act="spread-tasks" style="align-self:flex-start">Spread them over this week</button>` : ''}
+    </section>` : ''}
+    <section class="tiles" aria-label="At a glance">
+      <a class="tile industry" href="#/work"><span class="k"><span class="dot industry"></span>Freelance</span><span class="v">${fmtMins(mins)}</span><span class="s">of ${fmtMins(workTarget())}</span></a>
+      <a class="tile health" href="#/gym"><span class="k"><span class="dot health"></span>Gym</span><span class="v">${gym} / ${gymTarget()}</span><span class="s">this week</span></a>
+      <a class="tile treasury" href="#/money"><span class="k"><span class="dot treasury"></span>Money</span><span class="v">${budget ? gbp(Math.round(Math.abs(budget - spent))) : gbp(Math.round(spent))}</span><span class="s">${budget ? (spent > budget ? 'over budget' : `left in ${parseYmd(t).toLocaleDateString('en-GB', { month: 'short' })}`) : 'spent'}</span></a>
+    </section>
+    ${notes.join('')}
+    <div class="desk-grid">
+      <div class="col">
+        ${workCard}
+        <section class="card" aria-label="Due today">
+          <div class="card-head"><h2>Due today</h2><span class="meta">${list.length ? `${doneToday.length} of ${list.length} done` : ''}</span></div>
+          ${list.length ? `<div class="list">${list.map((x) => taskRow(x, { showDate: x.due_date < t })).join('')}</div>` : `<p class="empty">${daily(Q.emptyDue, 'due')}</p>`}
+          <a class="btn link" href="#/tasks" style="align-self:flex-start">All tasks →</a>
+        </section>
+      </div>
+      <div class="col">
+        ${growthMini()}
+        ${commitments.length ? `<section class="card" style="background:var(--treasury-soft)" aria-label="This week's commitments"><div class="card-head"><h2>This week I said I'd…</h2></div><ol class="commit">${commitments.map((c) => `<li>${esc(c)}</li>`).join('')}</ol></section>` : ''}
+        ${!workCard.includes('Next step') && latestNextStep() && !running && !brk ? nextStepSticky('Freelance · next step') : ''}
+        ${!brk ? `<button type="button" class="btn link" data-act="take-break" style="align-self:flex-start;color:var(--muted)">Feeling rough or away? Take a break →</button>` : ''}
+      </div>
+    </div>`;
+}
+
+/* ---------- Town ---------- */
+function viewTown() {
+  const t = town(); const L = t.level;
+  const pct = L.next ? ((t.xp - L.floor) / (L.next[0] - L.floor)) * 100 : 100;
+  const next = BUILDINGS.filter((b) => !t.built.includes(b.id)).map((b) => ({ b, have: statVal(t.st, b.stat) })).sort((a, b) => (b.have / b.b.need) - (a.have / a.b.need)).slice(0, 3);
+  const pols = S.policies.filter((p) => p.active);
+  const slots = policySlots();
+  const ws = weekStart(today());
+  const gz = gazette(ws);
+  if (!S.profile?.town_name && !S.needsUpdate) {
+    const ideas = ['Walshford', 'Gymbridge Wells', 'Little Budgeting', 'Freelancester', 'Upper Productivity', 'Much Wenlock-in'];
+    return `${head('Planning permission granted', 'Name your town', '', 'Every great town needs a name. Choose wisely; the Gazette will print it.')}
+      <form class="card" data-form="town-name" autocomplete="off">
+        <label class="field"><span>Town name</span><input name="town_name" class="input" maxlength="40" required placeholder="e.g. Walshford"></label>
+        <div class="suggest">${ideas.map((n) => `<button type="button" class="btn small" data-act="pick-town-name" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
+        <button class="btn primary" type="submit">Found my town</button>
+      </form>`;
+  }
+  return `
+    ${head(daily(Q.quips.town, 'town'), esc(S.profile?.town_name || 'Your town'), `<span class="level-chip">${esc(L.name)}</span>`)}
+    ${S.needsUpdate ? note('🛠️', 'Run <b>update-2.sql</b> in Supabase to unlock town names, policies and breaks.', 'update-banner') : ''}
+    <div class="desk-grid">
+      <div class="col">
+        <section class="card town-card" aria-label="Town map">${townSvg(t)}</section>
+        <section class="card dark" aria-label="Growth">
+          <div class="card-head"><span class="meta">${L.next ? `Next: ${esc(L.next[1])}` : 'Maximum town achieved'}</span><span class="meta">${t.xp}${L.next ? ` / ${L.next[0]}` : ''} growth</span></div>
+          ${bar(pct)}
+          <div style="font-size:14px;opacity:0.9">+${t.weekXp} this week. Growth only goes up — quiet weeks just grow slower.</div>
+        </section>
+        <section class="districts" aria-label="Districts">
+          ${districts().map((d) => `<a class="district ${d.d}" href="${d.href}"><span class="k"><span class="dot ${d.d}"></span>${d.name}</span><span class="v">${d.v}</span>${bar(d.pct)}<span class="r">${d.r}</span></a>`).join('')}
+        </section>
+      </div>
+      <div class="col">
+        <a class="gazette-link" href="#/review"><span style="flex:1;display:flex;flex-direction:column;gap:3px"><span class="kicker">The ${esc(gz.name)} Gazette · this week</span><span class="hl">${esc(gz.lead.h)}</span></span><span aria-hidden="true" style="font-size:22px">›</span></a>
+        <section class="card" aria-label="Policies">
+          <div class="card-head"><h2>Policies</h2><span class="meta">${pols.length} of ${slots} slots</span></div>
+          ${pols.length ? `<div class="list">${pols.map((p) => { const [s, cls] = policyNow(p); const n = policyStreak(p); return `
+            <div class="row"><span class="grow"><span class="title">${esc(p.title)}</span><span class="sub">${n ? `Kept ${n} week${n === 1 ? '' : 's'} running · +10 a week` : '+10 growth each week it’s kept'}</span></span><span class="policy-state ${cls}">${esc(s)}</span><button type="button" class="icon-btn" data-act="repeal-policy" data-id="${p.id}" aria-label="Repeal ${esc(p.title)}">${icon('close', 16)}</button></div>`; }).join('')}</div>`
+            : '<p class="empty">No policies yet. Enact one — a rule for your town that earns a bonus each week you keep it.</p>'}
+          ${pols.length < slots && !S.needsUpdate ? '<button type="button" class="btn small" data-act="enact-policy" style="align-self:flex-start">+ Enact a policy</button>' : ''}
+        </section>
+        <section class="card" aria-label="Next to build">
+          <div class="card-head"><h2>Next to build</h2><span class="meta">${t.built.length} of ${BUILDINGS.length} built</span></div>
+          <div class="unlock-list">${next.map(({ b, have }) => `
+            <div class="unlock"><span class="badge" style="background:var(--${b.d}-soft)">${b.need > 1 ? Math.min(have, b.need) : '?'}</span><span class="grow"><b>${esc(b.name)}</b><span class="meta">${esc(b.how)}${b.need > 1 ? ` · ${Math.min(have, b.need)} of ${b.need}` : ''}</span>${b.need > 1 ? `<span style="--accent:var(--${b.d})">${bar((have / b.need) * 100)}</span>` : ''}</span></div>`).join('') || '<p class="empty">Everything is built. Absolute legend.</p>'}</div>
+        </section>
+        <section class="card" aria-label="Unlocks">
+          <div class="card-head"><h2>Unlocks</h2></div>
+          ${UNLOCKS.map((u) => `<div class="row"><span class="grow"><span class="title">${esc(u.text)}</span><span class="sub">at ${esc(LEVELS[u.level][1])}</span></span><span class="policy-state ${L.idx >= u.level ? 'on' : 'off'}">${L.idx >= u.level ? 'Unlocked' : 'Locked'}</span></div>`).join('')}
+        </section>
+      </div>
+    </div>`;
+}
+
+/* ---------- Weekly review: the Gazette ---------- */
 function weekStats(ws) {
   const we = addDays(ws, 6); const t = today();
   const end = we < t ? we : t;
@@ -656,58 +1025,114 @@ function weekStats(ws) {
   let planned = 0; for (let d = ws; d <= end; d = addDays(d, 1)) planned += budgetTotal() / daysInMonth(monthOf(d));
   const tasksDone = S.tasks.filter((x) => x.done && x.done_at && localDay(x.done_at) >= ws && localDay(x.done_at) <= we).length;
   const slipped = [];
-  S.tasks.filter((x) => !x.done && x.due_date && x.due_date >= ws && x.due_date <= end && x.due_date < t).forEach((x) => slipped.push(`Not done: ${x.title}`));
+  S.tasks.filter((x) => !x.done && x.due_date && x.due_date >= ws && x.due_date <= end && x.due_date < t && !isPaused(x.due_date)).forEach((x) => slipped.push(`Not done: ${x.title}`));
   S.tasks.filter((x) => !x.done && x.times_moved >= 2).forEach((x) => slipped.push(`${x.title} — moved ${x.times_moved} times`));
   WORK_DAYS.map((wd) => addDays(ws, wd - 1)).filter((d) => d <= t && slotStatus(d) === 'missed').forEach((d) => slipped.push(`Missed ${DAY_LONG[isoWeekday(d)]}'s freelance session`));
   const m = monthOf(end);
   S.cats.forEach((c) => { const b = Number(c.monthly_budget); if (!b) return; const s = sum(monthExpenses(m).filter((e) => e.category_id === c.id), (e) => e.amount); if (s > b) slipped.push(`${c.name} is ${gbp(s - b)} over budget for ${parseYmd(m + '-01').toLocaleDateString('en-GB', { month: 'long' })}`); });
-  if (gym < GYM_TARGET_PER_WEEK && we < t) slipped.push(`Gym: ${gym} of ${GYM_TARGET_PER_WEEK} sessions`);
-  return { work, workPrev, gym, gymPrev, spend, planned, tasksDone, slipped: [...new Set(slipped)] };
+  const gT = gymTarget(ws), wT = workTarget(ws);
+  if (gym < gT && we < t) slipped.push(`Gym: ${gym} of ${gT} sessions`);
+  return { work, workPrev, gym, gymPrev, spend, planned, tasksDone, gymTarget: gT, workTarget: wT, slipped: [...new Set(slipped)] };
 }
-const diff = (a, b, fmt, unit = '') => (a === b ? 'Same as last week' : `${a > b ? 'Up' : 'Down'} ${fmt(Math.abs(a - b))}${unit} on last week`);
+const diff = (a, b, fmt) => (a === b ? 'Same as last week' : `${a > b ? 'Up' : 'Down'} ${fmt(Math.abs(a - b))} on last week`);
 
 function viewReview() {
   const t = today();
   const ws = S.reviewWeek || weekStart(t);
   const we = addDays(ws, 6);
   const isCurrent = ws === weekStart(t);
-  const st = weekStats(ws);
+  const gz = gazette(ws); const st = gz.st;
   const rev = reviewFor(ws);
-  const prevRev = reviewFor(addDays(ws, -7));
-  const said = (prevRev?.commitments || []).filter(Boolean);
+  const said = (reviewFor(addDays(ws, -7))?.commitments || []).filter(Boolean);
   const cm = rev?.commitments || [];
+  const weekNo = (() => { const d = parseYmd(ws); d.setDate(d.getDate() + 3); const y = new Date(d.getFullYear(), 0, 4); return 1 + Math.round(((d - y) / 864e5 - 3 + ((y.getDay() + 6) % 7)) / 7); })();
+  const gained = growthEvents().filter((e) => e.date >= ws && e.date <= we);
+  const bySrc = (src) => sum(gained.filter((e) => e.src === src), (e) => e.pts);
   const navBtns = `<div class="month-nav"><button type="button" class="icon-btn" data-act="review-week" data-dir="-1" aria-label="Previous week">${icon('left', 20)}</button><button type="button" class="icon-btn" data-act="review-week" data-dir="1" aria-label="Next week" ${isCurrent ? 'disabled' : ''}>${icon('right', 20)}</button></div>`;
   return `
-    ${head(`${parseYmd(ws).getDate()}${monthOf(ws) !== monthOf(we) ? ` ${parseYmd(ws).toLocaleDateString('en-GB', { month: 'short' })}` : ''}–${fmtDM(we)}${isCurrent ? ' · this week' : ''}`, 'Weekly review', navBtns)}
+    <div class="view-head" style="padding:12px 14px"><a href="#/town" class="btn link" style="min-height:36px">← Town</a>${navBtns}</div>
+    <article class="paper" aria-label="The Gazette">
+      <header class="masthead"><div class="date">Week ${weekNo} · ${parseYmd(ws).getDate()}${monthOf(ws) !== monthOf(we) ? ` ${parseYmd(ws).toLocaleDateString('en-GB', { month: 'short' })}` : ''}–${fmtDM(we)}${isCurrent ? ' · latest edition' : ''}</div><h1>The ${esc(gz.name)} Gazette</h1></header>
+      <div class="gz-kicker kick-${gz.lead.k}">${{ health: 'Health', industry: 'Industry', treasury: 'Treasury', services: 'Services', town: 'Town news' }[gz.lead.k]}</div>
+      <h2 class="lead">${esc(gz.lead.h)}</h2>
+      <p class="standfirst" style="margin:0">${esc(gz.lead.b)}</p>
+      ${gz.rest.length ? `<div class="stories">${gz.rest.map((s) => `<div class="story"><div class="gz-kicker kick-${s.k}">${{ health: 'Health', industry: 'Industry', treasury: 'Treasury', services: 'Services', town: 'Town' }[s.k]}</div><h3>${esc(s.h)}</h3><p>${esc(s.b)}</p></div>`).join('')}</div>` : ''}
+    </article>
     <section class="score" aria-label="Scorecard">
-      <div class="tile"><span class="k">Freelance</span><span class="v">${fmtMins(st.work)} / ${fmtMins(WORK_TARGET_MINUTES)}</span><span class="s ${st.work >= st.workPrev ? 'good' : ''}">${diff(st.work, st.workPrev, fmtMins)}</span></div>
-      <div class="tile"><span class="k">Gym sessions</span><span class="v">${st.gym} / ${GYM_TARGET_PER_WEEK}</span><span class="s ${st.gym >= st.gymPrev ? 'good' : ''}">${diff(st.gym, st.gymPrev, String)}</span></div>
-      <div class="tile"><span class="k">Spending</span><span class="v">${gbp(Math.round(st.spend))}</span><span class="s ${st.planned && st.spend <= st.planned ? 'good' : st.planned ? 'bad' : ''}">${st.planned ? (st.spend <= st.planned ? `${gbp(Math.round(st.planned - st.spend))} under plan` : `${gbp(Math.round(st.spend - st.planned))} over plan`) : 'No budget set'}</span></div>
-      <div class="tile"><span class="k">Tasks done</span><span class="v">${st.tasksDone}</span><span class="s">${S.tasks.filter((x) => !x.done && x.due_date && x.due_date <= we && x.due_date < t).length} still overdue</span></div>
+      <div class="tile industry"><span class="k">Freelance</span><span class="v">${fmtMins(st.work)} / ${fmtMins(st.workTarget)}</span><span class="s ${st.work >= st.workPrev ? 'good' : ''}">${diff(st.work, st.workPrev, fmtMins)}</span></div>
+      <div class="tile health"><span class="k">Gym</span><span class="v">${st.gym} / ${st.gymTarget}</span><span class="s ${st.gym >= st.gymPrev ? 'good' : ''}">${diff(st.gym, st.gymPrev, String)}</span></div>
+      <div class="tile treasury"><span class="k">Spending</span><span class="v">${gbp(Math.round(st.spend))}</span><span class="s ${st.planned && st.spend <= st.planned ? 'good' : st.planned ? 'bad' : ''}">${st.planned ? (st.spend <= st.planned ? `${gbp(Math.round(st.planned - st.spend))} under plan` : `${gbp(Math.round(st.spend - st.planned))} over plan`) : 'No budget set'}</span></div>
+      <div class="tile services"><span class="k">Tasks done</span><span class="v">${st.tasksDone}</span><span class="s">${S.tasks.filter((x) => !x.done && x.due_date && x.due_date <= we && x.due_date < t).length} still overdue</span></div>
     </section>
     <div class="desk-grid">
       <div class="col">
-        ${said.length ? `<section class="card soft" aria-label="Last week's commitments"><div class="card-head"><h2>You said you'd…</h2></div><ol class="commit">${said.map((c) => `<li>${esc(c)}</li>`).join('')}</ol><span class="meta" style="color:var(--green-deep)">Did you? Be honest in the notes below.</span></section>` : ''}
+        <section class="card accent" aria-label="Town growth"><div class="card-head"><h2>Town growth this week</h2><span class="big" style="font-size:28px">+${sum(gained, (e) => e.pts)}</span></div>
+          <div class="growth-lines">${[['health', 'Workouts'], ['industry', 'Freelance'], ['services', 'Tasks'], ['treasury', 'Money'], ['town', 'Milestones, policies & Gazettes']].filter(([k]) => bySrc(k)).map(([k, l]) => `<div><span><span class="dot ${k}"></span> ${l}</span><b>+${bySrc(k)}</b></div>`).join('') || '<div><span>Nothing yet. Early days.</span></div>'}</div></section>
+        ${said.length ? `<section class="card" style="background:var(--treasury-soft)" aria-label="Last week's priorities"><div class="card-head"><h2>Last week you said you'd…</h2></div><ol class="commit">${said.map((c) => `<li>${esc(c)}</li>`).join('')}</ol><span class="meta">Did you? Honesty in the notes below. Nobody's grading.</span></section>` : ''}
         <section class="card" aria-label="What slipped">
           <div class="card-head"><h2>What slipped</h2></div>
-          ${st.slipped.length ? `<ul class="slipped">${st.slipped.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>` : '<p class="empty">Nothing slipped. Great week.</p>'}
+          ${st.slipped.length ? `<ul class="slipped">${st.slipped.map((s) => `<li>${esc(s)}</li>`).join('')}</ul>` : '<p class="empty">Nothing slipped. Suspiciously competent.</p>'}
         </section>
       </div>
       <div class="col">
         <form class="card" data-form="review" data-week="${ws}" autocomplete="off">
           <label class="field"><span>What went well?</span><textarea name="went_well" class="input" maxlength="1000">${esc(rev?.went_well || '')}</textarea></label>
           <label class="field"><span>What got in the way?</span><textarea name="slipped" class="input" maxlength="1000">${esc(rev?.slipped || '')}</textarea></label>
-          <div class="field"><span>Next week I will…</span>
-            ${[0, 1, 2].map((i) => `<label class="sr" for="c${i}">Commitment ${i + 1}</label><input id="c${i}" name="c${i}" class="input" maxlength="140" value="${esc(cm[i] || '')}" placeholder="${['e.g. Hit the gym 4 times', 'e.g. Finish case study 2', 'Third commitment (optional)'][i]}">`).join('')}
+          <div class="field"><span>Council priorities for next week (up to 3)</span>
+            ${[0, 1, 2].map((i) => `<label class="sr" for="c${i}">Priority ${i + 1}</label><input id="c${i}" name="c${i}" class="input" maxlength="140" value="${esc(cm[i] || '')}" placeholder="${['e.g. Gym 3× including Sunday', 'e.g. Finish case study 2', 'Third one (optional — fewer is fine)'][i]}">`).join('')}
           </div>
-          <button class="btn primary" type="submit">${rev ? 'Update review' : 'Save review'}</button>
-          ${rev ? '<span class="meta">Saved. Your commitments will show on Today next week.</span>' : ''}
+          <button class="btn primary" type="submit">${rev ? 'Update the Gazette' : 'Publish the Gazette (+25)'}</button>
+          ${rev ? '<span class="meta">Published. Your priorities will show on Today next week.</span>' : ''}
         </form>
       </div>
     </div>`;
 }
 
-const VIEWS = { today: viewToday, tasks: viewTasks, work: viewWork, gym: viewGym, money: viewMoney, review: viewReview };
+/* ---------- Settings ---------- */
+function viewSettings() {
+  const n = { gym: true, weekly: true, tasks: false, max2: true, quiet_paused: true, ...(S.profile?.notify || {}) };
+  const push = S.pushState;
+  const sw = (key, title, sub, on, attrs) => `<label class="switch-row"><span class="grow"><span class="title" style="font-weight:600">${title}</span><span class="sub meta">${sub}</span></span><input type="checkbox" class="switch" ${attrs} ${on ? 'checked' : ''}></label>`;
+  return `
+    ${head(esc(S.user.email), 'Settings', '', 'The boring-but-important bits.')}
+    ${S.needsUpdate ? note('🛠️', 'Run <b>update-2.sql</b> in Supabase first — some settings need it.', 'update-banner') : ''}
+    <div class="desk-grid"><div class="col">
+      <section class="card" aria-label="Notifications">
+        <div class="card-head"><h2>Notifications</h2><span class="policy-state ${push === 'on' ? 'on' : 'off'}">${{ on: 'On for this phone', off: 'Off', blocked: 'Blocked', unsupported: 'Not supported' }[push] || 'Checking…'}</span></div>
+        ${push === 'on' ? '<div class="btn-row"><button type="button" class="btn small" data-act="push-test">Send me a test</button><button type="button" class="btn small danger" data-act="push-off">Turn off on this phone</button></div>'
+          : push === 'blocked' ? '<p class="meta" style="margin:0">Chrome is blocking them. Tap the ⋮ menu → Settings → Site settings → Notifications and allow this site, then come back.</p>'
+          : push === 'unsupported' ? '<p class="meta" style="margin:0">This browser can\'t do it. On your Pixel, use the installed app from Chrome.</p>'
+          : '<button type="button" class="btn primary" data-act="push-on">Turn on notifications</button>'}
+        <div class="list">
+          ${S.allReminders.map((r) => sw('', esc(r.title), `${DAY_LONG[r.weekday]}s at ${fmtTime(r.remind_at)}`, r.active, `data-change="rem-active" data-id="${r.id}"`)).join('')}
+          ${sw('gym', 'Gym nudge', '6pm, if 3 days pass without a workout', n.gym, 'data-change="notify-pref" data-key="gym"')}
+          ${sw('weekly', 'Sunday Gazette', 'Sundays at 6pm', n.weekly, 'data-change="notify-pref" data-key="weekly"')}
+          ${sw('tasks', 'Tasks due today', '8am, only if something is due', n.tasks, 'data-change="notify-pref" data-key="tasks"')}
+          ${sw('quiet', 'Quiet when on a break', 'No nudges while ill or on holiday', n.quiet_paused, 'data-change="notify-pref" data-key="quiet_paused"')}
+          ${sw('max2', 'Maximum 2 a day', 'So it never feels like nagging', n.max2, 'data-change="notify-pref" data-key="max2"')}
+        </div>
+      </section>
+    </div><div class="col">
+      <section class="card" aria-label="Breaks">
+        <div class="card-head"><h2>Breaks</h2></div>
+        ${activeBreak() ? `<p style="margin:0">${BREAK_LABEL[activeBreak().kind]} since ${esc(relDay(activeBreak().start_date))}.</p><button type="button" class="btn small primary" data-act="end-break" data-id="${activeBreak().id}" style="align-self:flex-start">I'm back</button>`
+          : '<p class="meta" style="margin:0">Ill, on holiday or just need a day? Streaks freeze and targets shrink. No guilt.</p><button type="button" class="btn small" data-act="take-break" style="align-self:flex-start">Take a break</button>'}
+      </section>
+      <section class="card" aria-label="Appearance">
+        <div class="card-head"><h2>Appearance</h2></div>
+        ${unlocked('night') ? sw('night', 'Night mode', 'Easier on the eyes after dark', S.profile?.theme === 'dark', 'data-change="theme"') : `<p class="meta" style="margin:0">🔒 Night mode unlocks when your town reaches <b>${LEVELS[2][1]}</b>.</p>`}
+        ${S.profile ? `<form class="inline-add" data-form="town-name" autocomplete="off"><label class="sr" for="tn">Town name</label><input id="tn" name="town_name" class="input" maxlength="40" value="${esc(S.profile.town_name || '')}" placeholder="Town name"><button class="btn small" type="submit">Rename</button></form>` : ''}
+      </section>
+      <section class="card" aria-label="Your data">
+        <div class="card-head"><h2>Your data</h2></div>
+        <button type="button" class="btn" data-act="export">Export everything (backup)</button>
+        <span class="meta">Worth doing once a month. Belt and braces.</span>
+        <button type="button" class="btn danger" data-act="sign-out">Sign out</button>
+      </section>
+    </div></div>`;
+}
+
+const VIEWS = { today: viewToday, tasks: viewTasks, work: viewWork, gym: viewGym, money: viewMoney, town: viewTown, review: viewReview, settings: viewSettings };
 
 /* =====================================================================
    Sheets (bottom-sheet dialogs)
@@ -811,7 +1236,7 @@ function toast(msg) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 async function run(fn, okMsg) {
-  try { await fn(); if (okMsg) toast(okMsg); }
+  try { await fn(); if (typeof okMsg === 'function') okMsg = okMsg(); if (okMsg) toast(okMsg); }
   catch (e) {
     console.error(e);
     toast(!navigator.onLine ? "You're offline — that wasn't saved." : `Couldn't save: ${e.message || 'unknown error'}`);
@@ -822,7 +1247,7 @@ const askFirst = (msg, fn) => { if (confirm(msg)) fn(); };
 
 const ACTIONS = {
   'close-sheet': closeSheet,
-  'account': (el, e) => { e.preventDefault(); accountSheet(); },
+  'account': (el, e) => { e.preventDefault(); location.hash = '#/settings'; },
   'fab': () => (route() === 'money' ? expenseForm() : taskForm()),
   'edit-task': (el) => taskForm(byId(S.tasks, el.dataset.id)),
   'toggle-done': () => { S.showDone = !S.showDone; render(); },
@@ -841,7 +1266,7 @@ const ACTIONS = {
   'goal-drop': (el) => askFirst('Delete this goal and its milestones?', () => run(async () => { await remove('goals', el.dataset.id); S.goals = S.goals.filter((g) => g.id !== el.dataset.id); }, 'Goal deleted')),
 
   // Freelance
-  'start-timer': () => { store.set('timer', { start: Date.now() }); closeSheet(); if (!['work', 'today'].includes(route())) location.hash = '#/work'; render(); toast('Session started — good.'); },
+  'start-timer': () => { store.set('timer', { start: Date.now() }); closeSheet(); if (!['work', 'today'].includes(route())) location.hash = '#/work'; render(); toast(any(['Session started. Kettle on standby.', 'Clock’s ticking. In a good way.', 'Off you go. Future you says ta.'])); },
   'stop-timer': () => { const tm = store.get('timer'); if (tm) sessionForm({ minutes: Math.max(1, Math.round((Date.now() - tm.start) / 60000)), title: 'Nice work — log it' }); },
   'discard-timer': () => askFirst('Discard this session without logging it?', () => { store.set('timer', null); render(); }),
   'log-minimum': () => sessionForm({ minutes: MINIMUM_MINUTES, kind: 'minimum', title: 'Bad-day minimum' }),
@@ -893,6 +1318,67 @@ const ACTIONS = {
   'save-file': () => saveFile('download'),
   'share-file': () => saveFile('share'),
   'sign-out': async () => { closeSheet(); await sb.auth.signOut(); },
+
+  // Breaks
+  'take-break': () => openSheet('Take a break', `
+    <form data-form="break" data-close="1" class="stack">
+      <div class="seg" role="radiogroup" aria-label="Why">
+        ${[['ill', 'Ill'], ['holiday', 'Holiday'], ['rest', 'Rest day']].map(([v, l], k) => `<label><input type="radio" name="kind" value="${v}" ${k === 0 ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+      </div>
+      <div class="form-grid">
+        <label class="field"><span>From</span><input type="date" name="start_date" class="input" value="${today()}" required></label>
+        <label class="field"><span>Until (optional)</span><input type="date" name="end_date" class="input" min="${today()}"></label>
+      </div>
+      <div class="card" style="box-shadow:none;background:var(--services-soft)">
+        <b>While you're off</b>
+        <span>✓ Streaks freeze — nothing counts as missed</span>
+        <span>✓ Weekly targets shrink to match the days you're here</span>
+        <span>✓ Nudges and notifications go quiet</span>
+        <span>✓ Your town keeps everything it's built</span>
+      </div>
+      <button class="btn primary" type="submit">Pause Daybook</button>
+      <p class="meta" style="margin:0;text-align:center">Leave “until” blank and tap “I'm back” when you are.</p>
+    </form>`),
+  'end-break': (el) => run(async () => {
+    const b = byId(S.breaks, el.dataset.id);
+    if (b.start_date >= today()) { await remove('breaks', b.id); S.breaks = S.breaks.filter((x) => x.id !== b.id); }
+    else replaceIn(S.breaks, await update('breaks', b.id, { end_date: addDays(today(), -1) }));
+    townCache = null;
+  }, 'Welcome back. The town put the kettle on.'),
+  'spread-tasks': () => run(async () => {
+    const back = recentReturn(); if (!back) return;
+    const waiting = S.tasks.filter((x) => !x.done && x.due_date && x.due_date < today() && x.due_date >= back.start_date);
+    for (let k = 0; k < waiting.length; k++) replaceIn(S.tasks, await update('tasks', waiting[k].id, { due_date: addDays(today(), k % 5) }));
+  }, 'Spread over the next few days. Much more civilised.'),
+
+  // Town
+  'pick-town-name': (el) => { const i = document.querySelector('input[name=town_name]'); if (i) i.value = el.dataset.name; },
+  'enact-policy': () => {
+    const have = S.policies.filter((p) => p.active).map((p) => p.kind + (p.params?.category_id || ''));
+    const opts = Object.entries(POLICY_TYPES).filter(([k, v]) => v.needsCat || !have.includes(k));
+    openSheet('Enact a policy', `
+      <p class="meta" style="margin:0">Every week you keep it: +10 growth. Slip up and you just miss the bonus. No fines, no riots.</p>
+      <form data-form="policy" data-close="1" class="stack">
+        <div class="list">${opts.map(([k, v], i) => `<label class="switch-row"><input type="radio" name="kind" value="${k}" ${i === 0 ? 'checked' : ''} style="width:22px;height:22px;accent-color:var(--town)"><span class="grow"><span class="title" style="font-weight:600">${esc(v.title)}</span><span class="sub meta">${esc(v.sub)}</span></span></label>`).join('')}</div>
+        <label class="field"><span>Category (for the money policies)</span><select name="category_id" class="input">${S.cats.map((c) => `<option value="${c.id}">${esc(c.name)}${c.monthly_budget ? ` · ${gbp(c.monthly_budget)}` : ''}</option>`).join('')}</select></label>
+        <button class="btn primary" type="submit">Enact</button>
+      </form>`);
+  },
+  'repeal-policy': (el) => askFirst('Repeal this policy? Growth it has already earned is kept.', () => run(async () => { await update('policies', el.dataset.id, { active: false }); S.policies = S.policies.filter((p) => p.id !== el.dataset.id); townCache = null; }, 'Repealed. The council shrugs.')),
+  'close-celebrate': () => { closeSheet(); sheet().classList.remove('celebrate'); },
+
+  // Notifications
+  'push-on': () => enablePush(),
+  'push-off': () => run(async () => {
+    const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription();
+    if (sub) { await q(sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint)); await sub.unsubscribe(); }
+    S.pushState = 'off';
+  }, 'Notifications off on this phone. Peace and quiet.'),
+  'push-test': () => run(async () => {
+    const { data, error } = await sb.functions.invoke('notify', { body: { test: true } });
+    if (error) throw new Error("the notification server isn't set up yet — see Claude's steps");
+    if (!data?.sent) throw new Error('no devices registered — try turning notifications off and on');
+  }, 'Test sent. Give it a few seconds.'),
 };
 
 /* ---------- Exports ----------
@@ -960,6 +1446,61 @@ function pageExport(page) {
   }
 }
 
+/* ---------- Celebrations ---------- */
+let celebrating = false;
+function maybeCelebrate() {
+  if (celebrating || !S.profile?.town_name || S.needsUpdate || sheet().open) return;
+  const t = town(); const seenL = S.profile.seen_level ?? -1; const seenB = S.profile.seen_buildings || [];
+  const newB = t.built.filter((id) => !seenB.includes(id));
+  if (t.level.idx <= seenL && !newB.length) return;
+  celebrating = true;
+  const name = S.profile.town_name; const first = seenL === -1;
+  const levelUp = !first && t.level.idx > seenL;
+  const bNames = newB.map((id) => BUILDINGS.find((b) => b.id === id).name);
+  const unlocks = UNLOCKS.filter((u) => u.level <= t.level.idx && u.level > seenL);
+  const kicker = first ? 'Town founded' : levelUp ? 'Milestone reached' : 'New building';
+  const title = first ? `${name} is officially on the map` : levelUp ? `${name} is now a ${t.level.name}` : `${bNames.length > 1 ? `${bNames.length} new buildings` : `The ${bNames[0]} has opened`}`;
+  const colours = ['#E8553B', '#6D4AE8', '#F2B21B', '#1C8FD6', '#0E8A6A', '#FF9A82'];
+  const confetti = Array.from({ length: 28 }, (_, k) => `<i style="left:${(k * 37) % 100}%;background:${colours[k % colours.length]};animation-delay:${(k % 7) * 0.08}s"></i>`).join('');
+  sheet().classList.add('celebrate');
+  openSheet('', `
+    <div class="confetti" aria-hidden="true">${confetti}</div>
+    <div class="kicker">${kicker}</div>
+    <h2 class="big-title">${esc(title)}</h2>
+    <div style="background:linear-gradient(180deg,#CFEFFF,#EAF8FF);border:2px solid #000;border-radius:18px;padding:6px">${townSvg(t)}</div>
+    <p style="margin:0;font-size:16px">${first ? `Starting life as a <b>${esc(t.level.name)}</b>, built from everything you've logged so far.` : any(['Look at you, being all consistent.', 'The council is thrilled. Mildly.', 'Someone fetch the bunting.', 'Frankly, showing off now.'])}</p>
+    ${bNames.length || unlocks.length ? `<div class="unlocked">${bNames.map((n) => `<span>🏗️ ${esc(n)} built</span>`).join('')}${unlocks.map((u) => `<span>🔓 Unlocked: ${esc(u.text)}</span>`).join('')}</div>` : ''}
+    <button type="button" class="btn primary" data-act="close-celebrate">${first ? 'Show me my town' : 'Lovely. Carry on.'}</button>`);
+  q(sb.from('profiles').update({ seen_level: t.level.idx, seen_buildings: t.built }).eq('user_id', S.user.id).select().single())
+    .then((p) => { S.profile = p; }).catch(() => {}).finally(() => { celebrating = false; });
+}
+
+/* ---------- Notifications ---------- */
+const b64u = (str) => { const padded = str + '='.repeat((4 - (str.length % 4)) % 4); const raw = atob(padded.replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(raw, (c) => c.charCodeAt(0)); };
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+async function checkPush() {
+  try {
+    if (!pushSupported()) { S.pushState = 'unsupported'; return; }
+    if (Notification.permission === 'denied') { S.pushState = 'blocked'; return; }
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && (await reg.pushManager.getSubscription());
+    S.pushState = sub && Notification.permission === 'granted' ? 'on' : 'off';
+  } catch { S.pushState = 'off'; }
+}
+async function enablePush() {
+  if (!pushSupported()) { S.pushState = 'unsupported'; render(); return; }
+  const perm = await Notification.requestPermission(); // must follow the tap directly
+  if (perm !== 'granted') { S.pushState = perm === 'denied' ? 'blocked' : 'off'; render(); return; }
+  return run(async () => {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC_KEY) });
+    const j = sub.toJSON();
+    await q(sb.from('push_subscriptions').upsert({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }, { onConflict: 'endpoint' }));
+    S.pushState = 'on';
+  }, 'Notifications on. We promise not to nag. Much.');
+}
+
 function startWorkout(name) {
   return run(async () => {
     if (activeWorkout()) return;
@@ -969,6 +1510,14 @@ function startWorkout(name) {
 }
 
 const CHANGES = {
+  'rem-active': (el) => run(async () => { replaceIn(S.allReminders, await update('reminders', el.dataset.id, { active: el.checked })); S.reminders = S.allReminders.filter((r) => r.active); }),
+  'notify-pref': (el) => run(async () => {
+    const notify = { gym: true, weekly: true, tasks: false, max2: true, quiet_paused: true, ...(S.profile?.notify || {}), [el.dataset.key]: el.checked };
+    S.profile = await q(sb.from('profiles').update({ notify }).eq('user_id', S.user.id).select().single());
+  }),
+  'theme': (el) => run(async () => {
+    S.profile = await q(sb.from('profiles').update({ theme: el.checked ? 'dark' : 'light' }).eq('user_id', S.user.id).select().single()); applyTheme();
+  }),
   'set-mode': (el) => {
     const form = el.closest('form'); const mode = el.value; S.setMode = mode; form.dataset.mode = mode;
     form.querySelectorAll('.w-only input').forEach((i) => { i.disabled = mode !== 'weights'; });
@@ -979,15 +1528,29 @@ const CHANGES = {
   'task-done': (el) => run(async () => {
     const done = el.checked;
     replaceIn(S.tasks, await update('tasks', el.dataset.id, { done, done_at: done ? new Date().toISOString() : null }));
-  }, el.checked ? 'Done ✓' : null),
+  }, el.checked ? any(Q.done) : null),
   'milestone': (el) => run(async () => {
     const done = el.checked;
     replaceIn(S.milestones, await update('milestones', el.dataset.id, { done, done_at: done ? new Date().toISOString() : null }));
-  }, el.checked ? 'Milestone ticked off' : null),
+  }, el.checked ? 'Milestone ticked off. Roadmap looking tidy.' : null),
 };
 
 const money = (v) => Math.round(Number(v) * 100) / 100;
 const FORMS = {
+  break: (f) => run(async () => {
+    const row = { kind: f.get('kind'), start_date: f.get('start_date'), end_date: f.get('end_date') || null };
+    S.breaks.unshift(await insert('breaks', row)); townCache = null;
+  }, () => BREAK_LINE[S.breaks[0]?.kind] || 'Paused.'),
+  'town-name': (f) => run(async () => {
+    const name = (f.get('town_name') || '').trim(); if (!name) return;
+    S.profile = await q(sb.from('profiles').update({ town_name: name }).eq('user_id', S.user.id).select().single());
+  }, () => `Welcome to ${S.profile?.town_name}. Population: you.`),
+  policy: (f) => run(async () => {
+    const kind = f.get('kind'); const t = POLICY_TYPES[kind]; const cid = f.get('category_id');
+    const cat = byId(S.cats, cid);
+    const title = t.needsCat ? (kind === 'pay_first' ? `Pay yourself first (${cat?.name || 'savings'})` : `Keep ${cat?.name || 'a category'} on budget`) : t.title;
+    S.policies.push(await insert('policies', { kind, title, params: t.needsCat ? { category_id: cid } : {} })); townCache = null;
+  }, 'Policy enacted. The council nods sagely.'),
   task: (f) => run(async () => {
     const title = f.get('title').trim(); if (!title) return;
     S.tasks.push(await insert('tasks', { title, due_date: f.get('due_date') || null, area: f.get('area') }));
@@ -1011,7 +1574,7 @@ const FORMS = {
     S.sessions.unshift(saved);
     S.sessions.sort((a, b) => b.session_on.localeCompare(a.session_on) || (b.created_at || '').localeCompare(a.created_at || ''));
     store.set('timer', null); closeSheet();
-  }, 'Session logged ✓'),
+  }, () => (S.sessions[0]?.kind === 'minimum' ? `${MINIMUM_MINUTES} minutes still counts. Chain intact.` : any(Q.session))),
   'day-off': (f) => run(async () => {
     S.daysOff.push(await insert('days_off', { off_date: f.get('off_date'), reason: f.get('reason').trim() || null }));
     S.daysOff.sort((a, b) => a.off_date.localeCompare(b.off_date));
@@ -1039,13 +1602,13 @@ const FORMS = {
     const name = existing[0]?.exercise || exerciseNames().find((n) => norm(n) === norm(exercise)) || exercise;
     const wkg = f.get('weight_kg'), reps = f.get('reps');
     S.sets.push(await insert('workout_sets', { workout_id: w.id, exercise: name, set_number: existing.length + 1, weight_kg: wkg === '' ? null : Number(wkg), reps: reps === '' ? null : Number(reps) }));
-  }, 'Set logged'),
+  }, () => { const last = S.sets[S.sets.length - 1]; if (!last || isCardio(last)) return any(Q.set); const b = bestFor(last.exercise); const earlier = S.sets.filter((x) => norm(x.exercise) === norm(last.exercise) && x.id !== last.id); return b && b.id === last.id && earlier.length ? `New personal best on ${last.exercise}! Frame it.` : any(Q.set); }),
 
   expense: (f) => run(async () => {
     const row = { amount: money(f.get('amount')), category_id: f.get('category_id') || null, description: f.get('description').trim() || null, spent_on: f.get('spent_on'), is_recurring: f.get('is_recurring') === 'on' };
     store.set('lastCat', row.category_id);
     S.expenses.unshift(await insert('expenses', row)); S.expenses.sort((a, b) => b.spent_on.localeCompare(a.spent_on));
-  }, 'Expense added'),
+  }, () => any(Q.expense)),
   'expense-edit': (f, form) => run(async () => {
     replaceIn(S.expenses, await update('expenses', form.dataset.id, { amount: money(f.get('amount')), category_id: f.get('category_id') || null, description: f.get('description').trim() || null, spent_on: f.get('spent_on'), is_recurring: f.get('is_recurring') === 'on' }));
     S.expenses.sort((a, b) => b.spent_on.localeCompare(a.spent_on));
@@ -1063,7 +1626,7 @@ const FORMS = {
     const ex = reviewFor(ws);
     const saved = ex ? await update('weekly_reviews', ex.id, row) : await insert('weekly_reviews', { ...row, week_start: ws });
     replaceIn(S.reviews, saved);
-  }, 'Review saved'),
+  }, 'Gazette published. Hot off the press.'),
 };
 
 document.addEventListener('click', (e) => {
@@ -1089,6 +1652,7 @@ document.addEventListener('toggle', (e) => {
   if (d.matches && d.matches('details[data-goal]')) { if (d.open) S.openGoals.add(d.dataset.goal); else S.openGoals.delete(d.dataset.goal); }
 }, true);
 sheet()?.addEventListener('click', (e) => { if (e.target === sheet()) closeSheet(); }); // tap backdrop to close
+sheet()?.addEventListener('close', () => sheet().classList.remove('celebrate'));
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 window.addEventListener('offline', () => toast("You're offline. Changes won't save until you reconnect."));
 document.addEventListener('visibilitychange', async () => {
@@ -1133,6 +1697,7 @@ async function start(user) {
     await seedIfNew();
     renderShell();
     render();
+    checkPush().then(() => { if (route() === 'settings') render(); });
   } catch (e) {
     console.error(e);
     S.user = null;

@@ -3,6 +3,12 @@
 A personal tracker for tasks, habits, freelance hours, gym and money, built as a phone-installable web app. The code is plain HTML, CSS and JavaScript with no build step. Data is stored in Supabase and locked to your login.
 
 ## What's in it
+- **Your town:** everything you log earns growth points. Your town levels up (Muddy field → Hamlet → Village → Market town → …), new buildings open as you hit milestones, and levels unlock features like night mode. Growth never goes down.
+- **Districts:** Health (gym), Industry (freelance), Treasury (money) and Services (tasks), each rated on the last fortnight.
+- **Policies:** rules you enact (never miss twice, hit the gym target, pay yourself first…). +10 growth for each week kept; no penalty for slipping.
+- **The Gazette:** the weekly review, written up as a newspaper about your week.
+- **Breaks:** ill, holiday or rest day. Streaks freeze, targets shrink, nudges go quiet, and nothing counts as missed.
+- **Notifications:** your routine reminders, a gym nudge, the Sunday Gazette and tasks due (needs the setup below).
 - **Today:** freelance, gym and money at a glance, what's due, routine reminders, the freelance session prompt, and this week's commitments
 - **Tasks & plans:** tasks by area and date, "move to tomorrow" (anything moved twice gets flagged), and goals with milestones
 - **Work (freelance):** session timer, the next-step sticky note, a bad-day 15-minute button, the never-miss-twice tracker, days away, and your roadmap
@@ -36,6 +42,14 @@ After a minute or two your site is live at `https://YOUR-GITHUB-USERNAME.github.
 - **Android:** open it in **Chrome** → ⋮ → **Install app**
 
 Then open it from the home screen and sign in. You only need to sign in once per device.
+
+## Update 2 (town, breaks, policies, notifications)
+1. Supabase → SQL Editor → run `supabase/update-2.sql`.
+2. Notifications (optional):
+   - Edge Functions → Secrets: add `VAPID_PUBLIC_KEY` (the value in `config.js`), `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (`mailto:` + your email) and `CRON_SECRET` (a long random string).
+   - Edge Functions → Deploy a new function → Via editor → name it `notify`, paste `supabase/functions/notify/index.ts`, turn **off** "Verify JWT", then deploy.
+   - SQL Editor → run `supabase/update-notifications.sql` with your `CRON_SECRET` pasted in.
+   - In the app: Settings → Turn on notifications → Send me a test.
 
 ## Updating
 When there's a new version, upload the changed files the same way (**Add file → Upload files**). The files will replace the old ones, and the site updates in about a minute.

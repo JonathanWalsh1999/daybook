@@ -12,3 +12,6 @@ export const MINIMUM_MINUTES = 15;        // the bad-day minimum
 
 // Gym
 export const GYM_TARGET_PER_WEEK = 3;     // sessions per week
+
+// Phone notifications (public half of the signing key — safe to publish)
+export const VAPID_PUBLIC_KEY = 'BP6CCKeYopd_poa7jTCRFF8yD4ABzoVFa5XGNHnwug-_mjMtOW_H3qwYXMeYl5NvwK0IDk9C1-GolVLt5HM-PTo';
