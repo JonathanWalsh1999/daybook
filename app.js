@@ -156,7 +156,9 @@ function missWarning() {
 const activeWorkout = () => S.workouts.find((w) => !w.ended_at) || null;
 const setsFor = (wid) => S.sets.filter((s) => s.workout_id === wid);
 const gymDays = (from, to) => [...new Set(S.workouts.map((w) => localDay(w.started_at)).filter((d) => d >= from && d <= to))];
-const exerciseNames = () => [...new Set(S.sets.slice().reverse().map((s) => s.exercise))];
+const isCardio = (s) => s.kind === 'cardio';
+const exerciseNames = (cardio = false) => [...new Set(S.sets.slice().reverse().filter((s) => isCardio(s) === cardio).map((s) => s.exercise))];
+const CARDIO_SUGGEST = ['Treadmill', 'Bike', 'Rowing', 'Cross-trainer', 'Stair climber', 'Run', 'Swim'];
 function lastTimeFor(exercise, excludeWid) {
   for (const w of S.workouts) {
     if (w.id === excludeWid) continue;
@@ -167,6 +169,14 @@ function lastTimeFor(exercise, excludeWid) {
 }
 function bestFor(exercise) {
   let best = null;
+  const cardioSets = S.sets.filter((s) => isCardio(s) && norm(s.exercise) === norm(exercise));
+  if (cardioSets.length) {
+    for (const s of cardioSets) {
+      const d = Number(s.distance_km) || 0, m = Number(s.duration_min) || 0;
+      if (!best || d > (Number(best.distance_km) || 0) || (d === (Number(best.distance_km) || 0) && m > (Number(best.duration_min) || 0))) best = s;
+    }
+    return best;
+  }
   for (const s of S.sets) {
     if (norm(s.exercise) !== norm(exercise) || s.weight_kg == null) continue;
     if (!best || Number(s.weight_kg) > Number(best.weight_kg) || (Number(s.weight_kg) === Number(best.weight_kg) && (s.reps || 0) > (best.reps || 0))) best = s;
@@ -174,7 +184,11 @@ function bestFor(exercise) {
   return best;
 }
 const kg = (n) => (n == null ? '—' : `${Number(n)}kg`);
-const setsLine = (ss) => { const w = ss[0]?.weight_kg; return ss.every((s) => s.weight_kg === w) ? `${kg(w)} × ${ss.map((s) => s.reps ?? '—').join(', ')}` : ss.map((s) => `${kg(s.weight_kg)}×${s.reps ?? '—'}`).join(', '); };
+const pace = (s) => (s.distance_km && s.duration_min ? (() => { const p = Number(s.duration_min) / Number(s.distance_km); return `${Math.floor(p)}:${pad(Math.round((p % 1) * 60))}/km`; })() : '');
+const cardioLine = (s) => [s.duration_min != null ? `${Number(s.duration_min)} min` : null, s.distance_km != null ? `${Number(s.distance_km)} km` : null].filter(Boolean).join(', ') || '—';
+const bestLabel = (b) => (isCardio(b) ? cardioLine(b) : `${kg(b.weight_kg)} × ${b.reps ?? '—'}`);
+const setsLine = (ss) => { if (ss.length && isCardio(ss[0])) return ss.map(cardioLine).join(' + ');
+  const w = ss[0]?.weight_kg; return ss.every((s) => s.weight_kg === w) ? `${kg(w)} × ${ss.map((s) => s.reps ?? '—').join(', ')}` : ss.map((s) => `${kg(s.weight_kg)}×${s.reps ?? '—'}`).join(', '); };
 const workoutMinutes = (w) => Math.max(1, Math.round(((w.ended_at ? new Date(w.ended_at) : new Date()) - new Date(w.started_at)) / 60000));
 
 // --- Money ---
@@ -370,6 +384,7 @@ function viewTasks() {
           : `<section class="card"><p class="empty">No open tasks${area !== 'all' ? ` in ${cap(area)}` : ''}. Nice.</p></section>`}
         ${done.length ? `<button type="button" class="btn link" data-act="toggle-done" style="align-self:flex-start">${S.showDone ? 'Hide' : 'Show'} ${done.length} done recently</button>
           ${S.showDone ? `<section class="card flush"><div class="list">${done.map((x) => taskRow(x)).join('')}</div></section>` : ''}` : ''}
+        ${S.tasks.length ? '<button type="button" class="btn link" data-act="export-page" data-page="tasks" style="align-self:flex-start">Export tasks as a spreadsheet (CSV)</button>' : ''}
       </div>
       <div class="col">
         <h2 class="section-label">Plans &amp; goals</h2>
@@ -466,6 +481,7 @@ function viewWork() {
           ${upcomingOff.length ? `<div class="list">${upcomingOff.map((o) => `<div class="row"><span class="grow"><span class="title">${esc(fmtLong(o.off_date))}</span>${o.reason ? `<span class="sub">${esc(o.reason)}</span>` : ''}</span><button type="button" class="icon-btn" data-act="delete-day-off" data-id="${o.id}" aria-label="Remove">${icon('close', 18)}</button></div>`).join('')}</div>`
             : `<p class="empty">Weekends away that you plan here don't count as misses.</p>`}
         </section>
+        ${S.sessions.length ? '<button type="button" class="btn link" data-act="export-page" data-page="work" style="align-self:flex-start">Export sessions as a spreadsheet (CSV)</button>' : ''}
       </div>
     </div>`;
 }
@@ -491,7 +507,7 @@ function viewGymIdle() {
   const lastWeek = gymDays(addDays(ws, -7), addDays(ws, -1)).length;
   const names = [...new Set(S.workouts.map((w) => w.name).filter(Boolean))].slice(0, 6);
   const recent = S.workouts.filter((x) => x.ended_at).slice(0, 12);
-  const bests = exerciseNames().slice(0, 8).map((e) => ({ e, b: bestFor(e) })).filter((x) => x.b);
+  const bests = [...exerciseNames().slice(0, 8), ...exerciseNames(true).slice(0, 4)].map((e) => ({ e, b: bestFor(e) })).filter((x) => x.b);
   return `
     ${head(`Goal: ${GYM_TARGET_PER_WEEK} sessions a week`, 'Gym')}
     <div class="desk-grid">
@@ -513,11 +529,14 @@ function viewGymIdle() {
         <section class="card" aria-label="Recent workouts">
           <div class="card-head"><h2>Recent workouts</h2></div>
           ${recent.length ? `<div class="list">${recent.map((x) => {
-            const ss = setsFor(x.id); const ex = new Set(ss.map((s) => norm(s.exercise))).size;
-            return `<div class="row"><button type="button" class="title-btn" data-act="show-workout" data-id="${x.id}"><span class="title">${esc(x.name || 'Workout')}</span><span class="sub">${esc(relDay(localDay(x.started_at)))} · ${ex} exercise${ex === 1 ? '' : 's'}, ${ss.length} sets · ${fmtMins(workoutMinutes(x))}</span></button></div>`;
+            const ss = setsFor(x.id); const lifts = ss.filter((q) => !isCardio(q)); const cardio = ss.filter(isCardio);
+            const ex = new Set(lifts.map((q) => norm(q.exercise))).size;
+            const bits = [ex ? `${ex} exercise${ex === 1 ? '' : 's'}, ${lifts.length} sets` : null, cardio.length ? `${fmtMins(sum(cardio, (q) => q.duration_min))} cardio` : null].filter(Boolean).join(' · ') || 'Nothing logged';
+            return `<div class="row"><button type="button" class="title-btn" data-act="show-workout" data-id="${x.id}"><span class="title">${esc(x.name || 'Workout')}</span><span class="sub">${esc(relDay(localDay(x.started_at)))} · ${bits} · ${fmtMins(workoutMinutes(x))}</span></button></div>`;
           }).join('')}</div>` : '<p class="empty">No workouts logged yet. Start one when you get to the gym.</p>'}
         </section>
-        ${bests.length ? `<section class="card" aria-label="Personal bests"><div class="card-head"><h2>Personal bests</h2></div><div class="list">${bests.map(({ e, b }) => `<div class="row"><span class="grow"><span class="title">${esc(e)}</span></span><span class="chip gym">${kg(b.weight_kg)} × ${b.reps ?? '—'}</span></div>`).join('')}</div></section>` : ''}
+        ${bests.length ? `<section class="card" aria-label="Personal bests"><div class="card-head"><h2>Personal bests</h2></div><div class="list">${bests.map(({ e, b }) => `<div class="row"><span class="grow"><span class="title">${esc(e)}</span></span><span class="chip gym">${esc(bestLabel(b))}</span></div>`).join('')}</div></section>` : ''}
+        ${S.workouts.length ? `<button type="button" class="btn link" data-act="export-page" data-page="gym" style="align-self:flex-start">Export workouts as a spreadsheet (CSV)</button>` : ''}
       </div>
     </div>`;
 }
@@ -525,27 +544,50 @@ function viewGymIdle() {
 function viewWorkout(w) {
   const ss = setsFor(w.id);
   const order = [...new Set(ss.map((s) => s.exercise))];
-  const lastSet = ss[ss.length - 1];
-  const curEx = lastSet?.exercise || '';
-  const prev = curEx ? lastTimeFor(curEx, w.id) : null;
+  const mode = S.setMode || (ss.length && isCardio(ss[ss.length - 1]) ? 'cardio' : 'weights');
+  const lastLift = ss.filter((x) => !isCardio(x)).pop();
+  const lastCardio = ss.filter(isCardio).pop();
+  const curEx = lastLift?.exercise || '';
+  const prev = mode === 'weights' && curEx ? lastTimeFor(curEx, w.id) : null;
   const names = exerciseNames();
+  const cNames = [...new Set([...exerciseNames(true), ...CARDIO_SUGGEST])];
+  const dis = (on) => (on ? '' : 'disabled');
   return `
     ${head(`Workout in progress · <span data-since="${new Date(w.started_at).getTime()}" data-fmt="min"></span>`, esc(w.name || 'Workout'))}
-    <form class="card" data-form="set" autocomplete="off">
-      <div class="card-head"><h2>Log a set</h2>${prev ? `<span class="meta">Last time: ${esc(setsLine(prev.sets))}</span>` : ''}</div>
-      <label class="field"><span>Exercise</span><input name="exercise" class="input" list="ex-names" value="${esc(curEx)}" placeholder="e.g. Back squat" required maxlength="80"></label>
-      <datalist id="ex-names">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-      <div class="form-grid">
-        <label class="field"><span>Weight (kg)</span><input name="weight_kg" class="input" type="number" inputmode="decimal" step="0.5" min="0" max="999" value="${lastSet?.weight_kg ?? ''}"></label>
-        <label class="field"><span>Reps</span><input name="reps" class="input" type="number" inputmode="numeric" min="0" max="999" value="${lastSet?.reps ?? ''}"></label>
+    <form class="card" data-form="set" data-mode="${mode}" autocomplete="off">
+      <div class="seg" role="radiogroup" aria-label="Type">
+        <label><input type="radio" name="mode" value="weights" data-change="set-mode" ${mode === 'weights' ? 'checked' : ''}><span>Weights</span></label>
+        <label><input type="radio" name="mode" value="cardio" data-change="set-mode" ${mode === 'cardio' ? 'checked' : ''}><span>Cardio</span></label>
       </div>
-      <button class="btn primary big-btn" type="submit">Log set</button>
+      <div class="w-only stack">
+        ${prev ? `<span class="meta">Last time: ${esc(setsLine(prev.sets))}</span>` : ''}
+        <label class="field"><span>Exercise</span><input name="exercise" class="input" list="ex-names" value="${esc(curEx)}" placeholder="e.g. Back squat" required maxlength="80" ${dis(mode === 'weights')}></label>
+        <datalist id="ex-names">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+        <div class="form-grid">
+          <label class="field"><span>Weight (kg)</span><input name="weight_kg" class="input" type="number" inputmode="decimal" step="0.5" min="0" max="999" value="${lastLift?.weight_kg ?? ''}" ${dis(mode === 'weights')}></label>
+          <label class="field"><span>Reps</span><input name="reps" class="input" type="number" inputmode="numeric" min="0" max="999" value="${lastLift?.reps ?? ''}" ${dis(mode === 'weights')}></label>
+        </div>
+      </div>
+      <div class="c-only stack">
+        <label class="field"><span>Activity</span><input name="activity" class="input" list="cardio-names" value="${esc(lastCardio?.exercise || '')}" placeholder="e.g. Treadmill, Bike, Rowing" required maxlength="80" ${dis(mode === 'cardio')}></label>
+        <datalist id="cardio-names">${cNames.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+        <div class="form-grid">
+          <label class="field"><span>Minutes</span><input name="duration_min" class="input" type="number" inputmode="decimal" step="0.5" min="0" max="600" required ${dis(mode === 'cardio')}></label>
+          <label class="field"><span>Distance (km, optional)</span><input name="distance_km" class="input" type="number" inputmode="decimal" step="0.01" min="0" max="500" ${dis(mode === 'cardio')}></label>
+        </div>
+      </div>
+      <button class="btn primary big-btn" type="submit"><span class="w-only">Log set</span><span class="c-only">Log cardio</span></button>
     </form>
     ${order.slice().reverse().map((ex) => {
       const exSets = ss.filter((s) => s.exercise === ex);
       const best = bestFor(ex); const last = lastTimeFor(ex, w.id);
+      if (isCardio(exSets[0])) return `<section class="card" aria-label="${esc(ex)}">
+        <div class="card-head"><h2>${esc(ex)}</h2>${best ? `<span class="chip gym">Best ${esc(bestLabel(best))}</span>` : ''}</div>
+        <div class="list">${exSets.map((s) => `<div class="row"><span class="grow"><span class="title">${esc(cardioLine(s))}</span>${pace(s) ? `<span class="sub">${pace(s)}</span>` : ''}</span><button type="button" class="icon-btn" data-act="delete-set" data-id="${s.id}" aria-label="Delete">${icon('close', 16)}</button></div>`).join('')}</div>
+        ${last ? `<div class="meta">Last time (${esc(relDay(localDay(last.w.started_at)))}): ${esc(setsLine(last.sets))}</div>` : ''}
+      </section>`;
       return `<section class="card" aria-label="${esc(ex)}">
-        <div class="card-head"><h2>${esc(ex)}</h2>${best ? `<span class="chip gym">Best ${kg(best.weight_kg)} × ${best.reps ?? '—'}</span>` : ''}</div>
+        <div class="card-head"><h2>${esc(ex)}</h2>${best ? `<span class="chip gym">Best ${esc(bestLabel(best))}</span>` : ''}</div>
         <div class="sets"><span>Set</span><span>kg</span><span>Reps</span><span></span>
         ${exSets.map((s, i) => `<span class="muted">${i + 1}</span><span>${s.weight_kg ?? '—'}</span><span>${s.reps ?? '—'}</span><button type="button" class="icon-btn" data-act="delete-set" data-id="${s.id}" aria-label="Delete set ${i + 1}">${icon('close', 16)}</button>`).join('')}</div>
         ${last ? `<div class="meta">Last time (${esc(relDay(localDay(last.w.started_at)))}): ${esc(setsLine(last.sets))}</div>` : ''}
@@ -599,6 +641,7 @@ function viewMoney() {
             <div class="row"><button type="button" class="title-btn" data-act="edit-expense" data-id="${e.id}"><span class="title">${esc(e.description || catName(e.category_id))}</span><span class="sub">${esc(catName(e.category_id))} · ${esc(relDay(e.spent_on))}${e.is_recurring ? ' · Recurring' : ''}</span></button><span class="amt">−${gbp(e.amount)}</span></div>`).join('')}</div>`
             : `<p class="empty">Nothing logged${isNow ? ' yet. Tap “Add expense” when you spend.' : '.'}</p>`}
         </section>
+        ${exps.length ? `<button type="button" class="btn link" data-act="export-page" data-page="money" style="align-self:flex-start">Export ${esc(fmtMonth(m))} as a spreadsheet (CSV)</button>` : ''}
       </div>
     </div>`;
 }
@@ -845,20 +888,77 @@ const ACTIONS = {
   // Review
   'review-week': (el) => { const cur = S.reviewWeek || weekStart(today()); const n = addDays(cur, 7 * Number(el.dataset.dir)); if (n <= weekStart(today())) { S.reviewWeek = n; render(); } },
 
-  'export': () => run(async () => {
-    const tables = ['tasks', 'goals', 'milestones', 'habits', 'habit_logs', 'workouts', 'workout_sets', 'expense_categories', 'expenses', 'work_sessions', 'days_off', 'weekly_reviews', 'reminders'];
-    const out = { exported_at: new Date().toISOString() };
-    for (const t of tables) out[t] = await q(sb.from(t).select('*'));
-    const name = `daybook-backup-${today()}.json`;
-    const file = new File([JSON.stringify(out, null, 2)], name, { type: 'application/json' });
-    if (navigator.canShare && navigator.canShare({ files: [file] }) && /iPhone|iPad|Android/i.test(navigator.userAgent)) {
-      await navigator.share({ files: [file], title: 'Daybook backup' });
-    } else {
-      const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    }
-  }, 'Backup ready'),
+  'export': (el) => backupExport(el),
+  'export-page': (el) => pageExport(el.dataset.page),
+  'save-file': () => saveFile('download'),
+  'share-file': () => saveFile('share'),
   'sign-out': async () => { closeSheet(); await sb.auth.signOut(); },
 };
+
+/* ---------- Exports ----------
+   Files are prepared first, then saved from a button tap: phones only allow
+   downloading/sharing straight after a tap, which is what caused "permission denied". */
+let pendingFile = null;
+const csvCell = (v) => { v = v == null ? '' : String(v); return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
+const toCsv = (rows) => '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n'); // BOM so Excel shows £ correctly
+function offerFile(name, text, type, summary) {
+  pendingFile = new File([text], name, { type });
+  const canShare = !!(navigator.canShare && navigator.canShare({ files: [pendingFile] }));
+  openSheet('Export ready', `
+    <p class="meta">${summary}</p>
+    <p style="margin:0;font-weight:600;overflow-wrap:anywhere">${esc(name)}</p>
+    <button type="button" class="btn primary" data-act="save-file">Download</button>
+    ${canShare ? '<button type="button" class="btn" data-act="share-file">Share… (email, Drive, Sheets)</button>' : ''}
+    <p class="meta">CSV files open in Google Sheets, Excel or Numbers.</p>`);
+}
+async function saveFile(how) {
+  if (!pendingFile) return;
+  try {
+    if (how === 'share') await navigator.share({ files: [pendingFile], title: pendingFile.name });
+    else {
+      const a = document.createElement('a'); a.href = URL.createObjectURL(pendingFile); a.download = pendingFile.name;
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+    closeSheet(); toast(how === 'share' ? 'Shared' : 'Downloaded — check your Downloads folder');
+  } catch (e) {
+    if (e.name !== 'AbortError') toast(`Couldn't save the file: ${e.message}`);
+  }
+}
+async function backupExport(el) {
+  el.disabled = true; el.textContent = 'Preparing backup…';
+  const tables = ['tasks', 'goals', 'milestones', 'workouts', 'workout_sets', 'expense_categories', 'expenses', 'work_sessions', 'days_off', 'weekly_reviews', 'reminders'];
+  const out = { exported_at: new Date().toISOString() }; const failed = [];
+  for (const t of tables) { try { out[t] = await q(sb.from(t).select('*')); } catch { failed.push(t); } }
+  offerFile(`daybook-backup-${today()}.json`, JSON.stringify(out, null, 2), 'application/json',
+    `Everything in Daybook, as one backup file.${failed.length ? ` (Couldn't read: ${esc(failed.join(', '))}.)` : ''}`);
+}
+function pageExport(page) {
+  const t = today();
+  if (page === 'money') {
+    const m = S.month; const exps = monthExpenses(m).slice().sort((a, b) => a.spent_on.localeCompare(b.spent_on));
+    const rows = [['Date', 'Description', 'Category', 'Amount (£)', 'Monthly bill'],
+      ...exps.map((e) => [e.spent_on, e.description || '', catName(e.category_id), Number(e.amount).toFixed(2), e.is_recurring ? 'Yes' : ''])];
+    rows.push([], ['Category', 'Spent (£)', 'Budget (£)', 'Left (£)']);
+    S.cats.forEach((c) => { const sp = sum(exps.filter((e) => e.category_id === c.id), (e) => e.amount); const b = c.monthly_budget; rows.push([c.name, sp.toFixed(2), b == null ? '' : Number(b).toFixed(2), b == null ? '' : (b - sp).toFixed(2)]); });
+    const unc = sum(exps.filter((e) => !e.category_id || !byId(S.cats, e.category_id)), (e) => e.amount);
+    if (unc) rows.push(['Uncategorised', unc.toFixed(2), '', '']);
+    rows.push(['Total', sum(exps, (e) => e.amount).toFixed(2), budgetTotal() ? budgetTotal().toFixed(2) : '', budgetTotal() ? (budgetTotal() - sum(exps, (e) => e.amount)).toFixed(2) : '']);
+    return offerFile(`daybook-money-${m}.csv`, toCsv(rows), 'text/csv', `${exps.length} expense${exps.length === 1 ? '' : 's'} for ${fmtMonth(m)}, plus a summary by category.`);
+  }
+  if (page === 'gym') {
+    const rows = [['Date', 'Workout', 'Exercise', 'Type', 'Set', 'Weight (kg)', 'Reps', 'Minutes', 'Distance (km)']];
+    S.workouts.slice().reverse().forEach((w) => setsFor(w.id).forEach((x) => rows.push([localDay(w.started_at), w.name || '', x.exercise, isCardio(x) ? 'Cardio' : 'Weights', x.set_number, x.weight_kg ?? '', x.reps ?? '', x.duration_min ?? '', x.distance_km ?? ''])));
+    return offerFile(`daybook-gym-${t}.csv`, toCsv(rows), 'text/csv', `${S.workouts.length} workout${S.workouts.length === 1 ? '' : 's'} from the last 4 months, one row per set.`);
+  }
+  if (page === 'work') {
+    const rows = [['Date', 'Minutes', 'Type', 'Worked on', 'Next step'], ...S.sessions.slice().reverse().map((x) => [x.session_on, x.minutes, x.kind === 'minimum' ? 'Minimum' : x.kind === 'volunteer' ? 'Volunteer' : 'Full', x.project || '', x.next_step || ''])];
+    return offerFile(`daybook-freelance-${t}.csv`, toCsv(rows), 'text/csv', `${S.sessions.length} freelance session${S.sessions.length === 1 ? '' : 's'} from the last 4 months.`);
+  }
+  if (page === 'tasks') {
+    const rows = [['Task', 'Area', 'Due', 'Done', 'Done on', 'Times moved'], ...S.tasks.map((x) => [x.title, cap(x.area), x.due_date || '', x.done ? 'Yes' : '', x.done_at ? localDay(x.done_at) : '', x.times_moved || 0])];
+    return offerFile(`daybook-tasks-${t}.csv`, toCsv(rows), 'text/csv', `Your open tasks and those done in the last 2 months.`);
+  }
+}
 
 function startWorkout(name) {
   return run(async () => {
@@ -869,6 +969,13 @@ function startWorkout(name) {
 }
 
 const CHANGES = {
+  'set-mode': (el) => {
+    const form = el.closest('form'); const mode = el.value; S.setMode = mode; form.dataset.mode = mode;
+    form.querySelectorAll('.w-only input').forEach((i) => { i.disabled = mode !== 'weights'; });
+    form.querySelectorAll('.c-only input').forEach((i) => { i.disabled = mode !== 'cardio'; });
+    const first = form.querySelector(mode === 'cardio' ? '.c-only input[name=activity]' : '.w-only input[name=exercise]');
+    if (first && !first.value) first.focus();
+  },
   'task-done': (el) => run(async () => {
     const done = el.checked;
     replaceIn(S.tasks, await update('tasks', el.dataset.id, { done, done_at: done ? new Date().toISOString() : null }));
@@ -913,7 +1020,21 @@ const FORMS = {
   'start-workout': (f) => startWorkout(f.get('name')),
   set: (f) => run(async () => {
     const w = activeWorkout(); if (!w) return;
-    const exercise = f.get('exercise').trim(); if (!exercise) return;
+    if (f.get('mode') === 'cardio') {
+      const act = (f.get('activity') || '').trim(); if (!act) return;
+      const known = exerciseNames(true).find((n) => norm(n) === norm(act)) || act;
+      const dist = f.get('distance_km');
+      try {
+        S.sets.push(await insert('workout_sets', { workout_id: w.id, exercise: known, kind: 'cardio', set_number: setsFor(w.id).filter((x) => norm(x.exercise) === norm(known)).length + 1, duration_min: Number(f.get('duration_min')), distance_km: dist === '' ? null : Number(dist) }));
+      } catch (e) {
+        if (/duration_min|distance_km|kind/.test(e.message || '')) throw new Error('cardio needs a one-off database update (see Claude\'s message)');
+        throw e;
+      }
+      S.setMode = 'cardio';
+      return;
+    }
+    S.setMode = 'weights';
+    const exercise = (f.get('exercise') || '').trim(); if (!exercise) return;
     const existing = setsFor(w.id).filter((s) => norm(s.exercise) === norm(exercise));
     const name = existing[0]?.exercise || exerciseNames().find((n) => norm(n) === norm(exercise)) || exercise;
     const wkg = f.get('weight_kg'), reps = f.get('reps');

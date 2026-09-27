@@ -78,6 +78,9 @@ create table if not exists public.workout_sets (
   set_number  int  not null,
   weight_kg   numeric(6,2),
   reps        int,
+  kind        text not null default 'weights' check (kind in ('weights','cardio')),
+  duration_min numeric(6,1),                           -- cardio
+  distance_km  numeric(7,2),                           -- cardio
   created_at  timestamptz not null default now()
 );
 

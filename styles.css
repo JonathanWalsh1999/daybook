@@ -295,3 +295,4 @@ dialog#sheet::backdrop { background: rgba(28,27,24,0.45); }
 .score .s.bad { color: var(--amber-ink); font-weight: 600; }
 @media (min-width: 960px) { .score { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .fab[hidden] { display: none; }
+form[data-mode="weights"] .c-only, form[data-mode="cardio"] .w-only { display: none; }
