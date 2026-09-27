@@ -11,4 +11,4 @@ export const WORK_DAYS = [1, 6];          // planned sessions: 1 = Monday, 6 = S
 export const MINIMUM_MINUTES = 15;        // the bad-day minimum
 
 // Gym
-export const GYM_TARGET_PER_WEEK = 4;     // sessions per week
+export const GYM_TARGET_PER_WEEK = 3;     // sessions per week

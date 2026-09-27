@@ -41,4 +41,4 @@ Then open it from the home screen and sign in. You only need to sign in once per
 When there's a new version, upload the changed files the same way (**Add file → Upload files**). The files will replace the old ones, and the site updates in about a minute.
 
 ## Settings
-`config.js` holds your weekly freelance target (3 hours), your planned session days (Monday and Saturday), the bad-day minimum (15 minutes) and your gym target (4 a week).
+`config.js` holds your weekly freelance target (3 hours), your planned session days (Monday and Saturday), the bad-day minimum (15 minutes) and your gym target (3 a week).

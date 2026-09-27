@@ -1,6 +1,6 @@
 // Offline support: the app shell is cached so Daybook opens without a connection.
 // Your data always comes fresh from the database when online.
-const VERSION = 'daybook-v2';
+const VERSION = 'daybook-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
