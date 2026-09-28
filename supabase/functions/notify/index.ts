@@ -6,7 +6,14 @@ import webpush from 'npm:web-push@3.6.7';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
-webpush.setVapidDetails(Deno.env.get('VAPID_SUBJECT') || 'mailto:daybook@example.com', Deno.env.get('VAPID_PUBLIC_KEY')!, Deno.env.get('VAPID_PRIVATE_KEY')!);
+
+// Set up signing lazily so a bad secret gives a readable error instead of a crash.
+let vapidError: string | null = null;
+try {
+  const subject = (Deno.env.get('VAPID_SUBJECT') || '').trim();
+  webpush.setVapidDetails(subject.startsWith('mailto:') || subject.startsWith('https:') ? subject : `mailto:${subject || 'daybook@example.com'}`,
+    (Deno.env.get('VAPID_PUBLIC_KEY') || '').trim(), (Deno.env.get('VAPID_PRIVATE_KEY') || '').trim());
+} catch (e) { vapidError = String((e as Error).message || e); }
 
 const WINDOW = 5; // minutes; matches the cron schedule
 const DEFAULTS = { gym: true, weekly: true, tasks: false, max2: true, quiet_paused: true };
@@ -73,7 +80,9 @@ const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers
 // "Send me a test" button in the app: signed-in user, their own devices only.
 async function sendTest(req: Request) {
   const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
-  const { data: { user } } = await sb.auth.getUser(token);
+  if (!token) return new Response('Unauthorized', { status: 401, headers: CORS });
+  const { data } = await sb.auth.getUser(token);
+  const user = data?.user;
   if (!user) return new Response('Unauthorized', { status: 401, headers: CORS });
   const { data: subs } = await sb.from('push_subscriptions').select('*').eq('user_id', user.id);
   let ok = 0;
@@ -91,7 +100,19 @@ async function sendTest(req: Request) {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
-  if (req.headers.get('x-cron-secret') !== Deno.env.get('CRON_SECRET')) return sendTest(req);
+  try {
+  // Health check: open the function URL in a browser to see whether setup is complete (no secrets shown).
+  if (req.method === 'GET') {
+    const has = (k: string) => !!(Deno.env.get(k) || '').trim();
+    const { error: dbErr } = await sb.from('push_subscriptions').select('id', { count: 'exact', head: true });
+    return new Response(JSON.stringify({
+      secrets: { VAPID_PUBLIC_KEY: has('VAPID_PUBLIC_KEY'), VAPID_PRIVATE_KEY: has('VAPID_PRIVATE_KEY'), VAPID_SUBJECT: has('VAPID_SUBJECT'), CRON_SECRET: has('CRON_SECRET') },
+      signing: vapidError ? `problem: ${vapidError}` : 'ok',
+      database: dbErr ? `problem: ${dbErr.message}` : 'ok',
+    }, null, 1), { headers: { ...CORS, 'Content-Type': 'application/json' } });
+  }
+  if (vapidError) return new Response(`Signing keys problem: ${vapidError}`, { status: 500, headers: CORS });
+  if ((req.headers.get('x-cron-secret') || '').trim() !== (Deno.env.get('CRON_SECRET') || '').trim() || !Deno.env.get('CRON_SECRET')) return await sendTest(req);
   const now = londonNow();
   const { data: subs, error } = await sb.from('push_subscriptions').select('*');
   if (error) return new Response(error.message, { status: 500 });
@@ -113,4 +134,7 @@ Deno.serve(async (req) => {
     }
   }
   return new Response(JSON.stringify({ ok: true, at: now, sent: sentCount }), { headers: { 'Content-Type': 'application/json' } });
+  } catch (e) {
+    return new Response(`Error: ${String((e as Error).message || e)}`, { status: 500, headers: CORS });
+  }
 });
